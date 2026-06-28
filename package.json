@@ -1,0 +1,25 @@
+{
+  "name": "crypto-lab-tls-handshake",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx scripts/phase-checks.ts all",
+    "verify:keyschedule": "tsx scripts/phase-checks.ts keyschedule",
+    "verify:auth": "tsx scripts/phase-checks.ts auth",
+    "verify:record": "tsx scripts/phase-checks.ts record",
+    "verify:handshake": "tsx scripts/phase-checks.ts handshake"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.4"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0"
+  }
+}
