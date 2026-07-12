@@ -94,39 +94,19 @@ a {
 
 /* ---- Hero ---------------------------------------------------------------- */
 
-.hero {
-  background: linear-gradient(150deg, rgba(17, 26, 43, 0.9), rgba(8, 14, 26, 0.92));
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  padding: 1.5rem;
-  box-shadow: 0 16px 38px rgba(2, 8, 18, 0.4);
-}
-
-:root[data-theme='light'] .hero {
-  background: linear-gradient(150deg, #ffffff, #e8f0fa);
-  box-shadow: 0 14px 34px rgba(40, 60, 90, 0.12);
-}
-
-.kicker {
-  margin: 0;
-  color: var(--accent);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  font-size: 0.78rem;
-  font-family: 'IBM Plex Mono', monospace;
-}
-
-h1 {
-  font-size: clamp(1.7rem, 3.2vw, 2.8rem);
-  margin-top: 0.35rem;
-}
-
-.subtitle {
-  margin-top: 0.6rem;
-  color: var(--muted);
-  max-width: 72ch;
-  line-height: 1.5;
-}
+/* BEGIN cl-hero standard — managed, keep in sync across fleet
+   Accent/tint/text mapped to this lab's theme vars:
+   --text=--ink, --text-dim=--muted, --accent=--accent, --border=--line. */
+.cl-hero{display:flex;align-items:flex-start;justify-content:space-between;gap:clamp(1rem,4vw,3rem);flex-wrap:wrap;margin:clamp(1rem,3vw,2rem) 0 1.5rem;}
+.cl-hero-main{flex:1 1 22rem;min-width:min(100%,20rem);}
+.cl-hero-title{margin:0;font-size:clamp(1.6rem,3.8vw,2.7rem);font-weight:700;line-height:1.1;letter-spacing:.01em;color:var(--ink);}
+.cl-hero-sub{margin:.4rem 0 0;font-size:clamp(.9rem,1.6vw,1.05rem);letter-spacing:.01em;opacity:.85;color:var(--accent);font-family:'IBM Plex Mono',monospace;}
+.cl-hero-desc{margin:.55rem 0 0;font-size:1rem;line-height:1.5;color:var(--muted);max-width:60ch;}
+.cl-hero-why{flex:0 1 min(40%,26rem);min-width:min(100%,15rem);border:1px solid var(--line);border-radius:10px;padding:.85rem 1.05rem;background:color-mix(in oklab,var(--accent) 6%,transparent);}
+.cl-hero-why-label{display:block;font-size:.68rem;font-weight:700;letter-spacing:.14em;color:var(--accent);}
+.cl-hero-why-text{margin:.35rem 0 0;font-size:.95rem;line-height:1.5;color:var(--ink);}
+@media (max-width:640px){.cl-hero{flex-direction:column;}.cl-hero-why{flex-basis:auto;width:100%;}}
+/* END cl-hero standard */
 
 .controls {
   margin-top: 1.1rem;
@@ -746,7 +726,6 @@ td.no {
   #app {
     width: calc(100% - 1rem);
   }
-  .hero,
   .panel {
     padding: 0.85rem;
   }

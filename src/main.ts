@@ -299,12 +299,20 @@ function render(): void {
   const t = state.trace;
   appRoot.innerHTML = `
     <main class="shell" aria-label="TLS 1.3 handshake walkthrough">
-      <header class="hero">
-        <p class="kicker">TLS 1.3 Handshake Lab · RFC 8446</p>
-        <h1>The TLS 1.3 Handshake, Step by Step</h1>
-        <p class="subtitle">Watch a real HTTPS connection get established: ephemeral X25519 key exchange, Ed25519
-          certificate authentication, the HKDF key schedule, and AES-128-GCM record protection — every key derived live
-          in your browser, no backend, no faked math.</p>
+      <header class="cl-hero">
+        <div class="cl-hero-main">
+          <h1 class="cl-hero-title">TLS 1.3 Handshake</h1>
+          <p class="cl-hero-sub">TLS 1.3 · RFC 8446</p>
+          <p class="cl-hero-desc">Step through a real 1-RTT handshake and watch ephemeral X25519 key exchange, Ed25519
+            certificate authentication, the HKDF key schedule, and AES-128-GCM record protection combine live in your
+            browser — with an MITM attempt you can run yourself.</p>
+        </div>
+        <aside class="cl-hero-why" aria-label="Why it matters">
+          <span class="cl-hero-why-label">WHY IT MATTERS</span>
+          <p class="cl-hero-why-text">HTTPS guards every login, payment, and message you send. Key exchange alone gives
+            you a shared secret with <em>someone</em>; only the certificate signature proves it's the real server, and
+            that authentication step is exactly what stops a machine-in-the-middle from silently reading it all.</p>
+        </aside>
       </header>
       ${overviewSection()}
       ${simulatorSection(t)}
