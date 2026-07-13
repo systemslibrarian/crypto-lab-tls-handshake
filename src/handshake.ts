@@ -164,6 +164,48 @@ export interface HandshakeStep {
   /** Security properties established once this step completes. */
   security: string[];
   bytesOnWire: number;
+  /**
+   * Transcript hash SHA-256(all handshake messages sent so far, up to and
+   * including this one). This is the running value that CertificateVerify signs
+   * and the Finished MACs cover — making transcript binding a value you watch
+   * change rather than a claim in prose.
+   */
+  transcriptHashHex: string;
+  /** True on the steps whose security rests on the transcript hash above. */
+  bindsTranscript?: boolean;
+}
+
+/**
+ * The Diffie–Hellman "aha": two DIFFERENT private inputs producing ONE identical
+ * output. Both private keys are exposed here (masked in the UI) purely so the
+ * demo can SHOW they differ; they never cross the wire in a real handshake.
+ */
+export interface KeyExchangeView {
+  clientPrivateHex: string;
+  clientPublicHex: string;
+  serverPrivateHex: string;
+  serverPublicHex: string;
+  /** X25519(client_sk, server_pk) — the client's independently computed secret. */
+  clientSecretHex: string;
+  /** X25519(server_sk, client_pk) — the server's independently computed secret. */
+  serverSecretHex: string;
+  agrees: boolean;
+}
+
+/** One HKDF-Expand-Label derivation, decomposed into its real inputs and output. */
+export interface DerivationView {
+  /** Name of the output secret. */
+  output: string;
+  /** The secret fed in (PRK) — the parent this value branches from. */
+  fromSecret: string;
+  fromSecretHex: string;
+  /** The literal ASCII label, e.g. "s hs traffic" (sent as "tls13 s hs traffic"). */
+  label: string;
+  /** Where the context (Hash(messages)) comes from, in words. */
+  contextDesc: string;
+  contextHex: string;
+  outLen: number;
+  outputHex: string;
 }
 
 export interface RecordDemo {
@@ -192,6 +234,11 @@ export interface HandshakeTrace {
   serverFlightBytes: number;
   clientAppKeys: TrafficKeys;
   record: RecordDemo;
+  keyExchange: KeyExchangeView;
+  /** The transcript hash the CertificateVerify signature is computed over. */
+  certVerifyTranscriptHex: string;
+  /** One fully decomposed HKDF derivation, for the schedule "show your work" view. */
+  sampleDerivation: DerivationView;
 }
 
 function preview(bytes: Uint8Array, head = 6, tail = 6): string {
@@ -280,7 +327,47 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
     `GET / HTTP/1.1\r\nHost: ${serverName}\r\n\r\n`,
   );
 
-  const steps: HandshakeStep[] = [
+  // Running transcript hash after each handshake message. This is the exact
+  // value CertificateVerify signs and the Finished MACs cover; exposing it per
+  // step lets the UI show it grow as the conversation unfolds.
+  const clientFinishedTh = await sha256(
+    concatBytes(clientHello, serverHello, encryptedExtensions, certificate, certificateVerify, serverFinished, clientFinished),
+  );
+  const thByStepId: Record<string, string> = {
+    'client-hello': toHex(await sha256(clientHello)),
+    'server-hello': toHex(thHello),
+    'encrypted-extensions': toHex(await sha256(concatBytes(clientHello, serverHello, encryptedExtensions))),
+    certificate: toHex(thForCertVerify),
+    'certificate-verify': toHex(thForCertVerify), // CV signs Hash(CH..Certificate); transcript unchanged until it is appended
+    'server-finished': toHex(thForServerFinished),
+    'client-finished': toHex(clientFinishedTh),
+    'application-data': toHex(clientFinishedTh),
+  };
+
+  // One fully decomposed derivation for the "show your work" HKDF view: the
+  // server handshake traffic secret. Real inputs, real output.
+  const sampleDerivation: DerivationView = {
+    output: 'server_handshake_traffic_secret',
+    fromSecret: 'Handshake Secret',
+    fromSecretHex: toHex(schedule.handshakeSecret),
+    label: 's hs traffic',
+    contextDesc: 'Hash(ClientHello ‖ ServerHello) — the "transcript so far"',
+    contextHex: toHex(thHello),
+    outLen: schedule.serverHandshakeTrafficSecret.length,
+    outputHex: toHex(schedule.serverHandshakeTrafficSecret),
+  };
+
+  const keyExchange: KeyExchangeView = {
+    clientPrivateHex: toHex(clientKeys.secretKey),
+    clientPublicHex: toHex(clientKeys.publicKey),
+    serverPrivateHex: toHex(serverKeys.secretKey),
+    serverPublicHex: toHex(serverKeys.publicKey),
+    clientSecretHex: toHex(clientShared),
+    serverSecretHex: toHex(serverShared),
+    agrees: sharedSecretAgrees,
+  };
+
+  const stepsBase: Omit<HandshakeStep, 'transcriptHashHex'>[] = [
     {
       id: 'client-hello',
       flight: 1,
@@ -365,6 +452,7 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
         'This is what defeats a man-in-the-middle — see the MITM panel below.',
       ],
       bytesOnWire: certificateVerify.length,
+      bindsTranscript: true,
     },
     {
       id: 'server-finished',
@@ -380,6 +468,7 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
       derived: [keyView('server Finished verify_data', serverFinishedData)],
       security: ['Handshake integrity: the entire transcript so far is MAC-bound. Tampering is detected.'],
       bytesOnWire: serverFinished.length,
+      bindsTranscript: true,
     },
     {
       id: 'client-finished',
@@ -418,6 +507,11 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
     },
   ];
 
+  const steps: HandshakeStep[] = stepsBase.map((s) => ({
+    ...s,
+    transcriptHashHex: thByStepId[s.id] ?? '',
+  }));
+
   const serverFlightBytes =
     serverHello.length +
     encryptedExtensions.length +
@@ -441,6 +535,9 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
     serverFlightBytes,
     clientAppKeys,
     record,
+    keyExchange,
+    certVerifyTranscriptHex: toHex(thForCertVerify),
+    sampleDerivation,
   };
 }
 
@@ -499,6 +596,12 @@ export interface MitmResult {
   /** The connection is only safe if the forged auth is rejected. */
   attackBlocked: boolean;
   explanation: string[];
+  /** Transcript hash of the genuine client<->server conversation. */
+  genuineTranscriptHex: string;
+  /** Transcript hash of the client<->attacker conversation — a DIFFERENT value. */
+  attackerTranscriptHex: string;
+  /** True: the two transcripts differ, so a signature over one can't satisfy the other. */
+  transcriptsDiffer: boolean;
 }
 
 /**
@@ -514,11 +617,21 @@ export async function runMitmAttempt(serverName = 'example.com'): Promise<MitmRe
   // Client and attacker complete an ECDHE just fine.
   const client = x25519Keygen();
   const attacker = x25519Keygen();
+  const server = x25519Keygen();
   const attackerShared = x25519SharedSecret(attacker.secretKey, client.publicKey);
   const keyExchangeSucceeded = attackerShared.length === 32;
 
-  // Build a plausible transcript and have the attacker try to authenticate.
-  const transcriptHash = await sha256(concatBytes(client.publicKey, attacker.publicKey, utf8(serverName)));
+  // Two DIFFERENT conversations happen: the genuine client<->server transcript,
+  // and the client<->attacker transcript. Because the attacker injected its own
+  // ephemeral key_share, the two transcript hashes differ — so a signature over
+  // one is meaningless against the other. This is the concrete reason MITM fails.
+  const genuineTranscript = await sha256(concatBytes(client.publicKey, server.publicKey, utf8(serverName)));
+  const attackerTranscript = await sha256(concatBytes(client.publicKey, attacker.publicKey, utf8(serverName)));
+  const transcriptsDiffer = !equalBytes(genuineTranscript, attackerTranscript);
+
+  // The transcript the client will actually verify the signature against is the
+  // attacker-side one (that is the conversation the client had).
+  const transcriptHash = attackerTranscript;
 
   // Attacker copies the real leaf certificate (public). The chain validates,
   // because the certificate itself is genuine and root-signed.
@@ -541,6 +654,9 @@ export async function runMitmAttempt(serverName = 'example.com'): Promise<MitmRe
     certificateVerifyForged: true,
     certificateVerifyAccepted,
     attackBlocked,
+    genuineTranscriptHex: toHex(genuineTranscript),
+    attackerTranscriptHex: toHex(attackerTranscript),
+    transcriptsDiffer,
     explanation: [
       'Key exchange with the attacker succeeds — ephemeral public keys are public, so ECDHE alone proves nothing.',
       'The attacker even replays the real, root-signed server certificate, so chain validation passes.',

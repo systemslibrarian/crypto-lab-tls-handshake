@@ -1,5 +1,12 @@
 import './style.css';
-import { runFullHandshake, runMitmAttempt, type HandshakeTrace, type HandshakeStep, type MitmResult } from './handshake';
+import {
+  runFullHandshake,
+  runMitmAttempt,
+  type HandshakeTrace,
+  type HandshakeStep,
+  type MitmResult,
+  type DerivationView,
+} from './handshake';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) {
@@ -13,6 +20,8 @@ interface State {
   mitm: MitmResult | null;
   autoPlay: boolean;
   autoTimer: number | null;
+  /** +1 when the last navigation moved forward (fly the packet); 0 = no fly. */
+  flyDelta: number;
 }
 
 const state: State = {
@@ -21,7 +30,10 @@ const state: State = {
   mitm: null,
   autoPlay: false,
   autoTimer: null,
+  flyDelta: 0,
 };
+
+const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // ---- small helpers ---------------------------------------------------------
 
@@ -78,11 +90,13 @@ function ladderRow(s: HandshakeStep, idx: number): string {
   const dirClass = s.to === 'server' ? 'to-server' : 'to-client';
   const stateClass = idx === state.step ? 'current' : idx < state.step ? 'seen' : '';
   const wire = s.to === 'server' ? '──▶' : '◀──';
+  // The packet token slides across .wire when this row becomes current (see wire()).
+  const packet = `<span class="packet ${s.encrypted}" aria-hidden="true" data-dir="${s.to}">${esc(s.title)}</span>`;
   return `
     <button class="msg ${dirClass} ${stateClass}" data-step="${idx}" aria-current="${idx === state.step ? 'step' : 'false'}"
-      aria-label="Step ${idx + 1}: ${esc(s.title)}, ${s.from} to ${s.to}">
+      aria-label="Step ${idx + 1}: ${esc(s.title)}, ${s.from} to ${s.to}, ${s.encrypted === 'plaintext' ? 'cleartext' : s.encrypted + ' key encrypted'}">
       <span class="label">${esc(s.title)}<br><span class="bytes">${s.bytesOnWire} B · ${lockBadge(s.encrypted)}</span></span>
-      <span class="wire">${wire}</span>
+      <span class="wire">${wire}${packet}</span>
       <span class="label"></span>
     </button>`;
 }
@@ -93,6 +107,18 @@ function detailCard(s: HandshakeStep): string {
         .map((k) => `<div class="keyrow"><span class="kname">${esc(k.name)} (${k.bytes} B)</span><span class="kval">${esc(k.preview)}</span></div>`)
         .join('')}</div>`
     : '';
+  const bindNote = s.bindsTranscript
+    ? `<span class="tx-bind">↑ this exact hash is what gets ${s.id === 'certificate-verify' ? 'SIGNED' : 'MAC&#39;d'} here</span>`
+    : '';
+  const txChip = `
+      <h4>Transcript so far
+        <span class="term" tabindex="0" role="note" aria-label="Transcript hash: SHA-256 over every handshake message seen so far. Signatures and MACs are computed over this value, binding them to this exact conversation.">?</span>
+      </h4>
+      <div class="tx-chip ${s.bindsTranscript ? 'binding' : ''}">
+        <span class="tx-label">SHA-256(messages 1..${stepOrdinal(s)})</span>
+        <span class="tx-val" tabindex="0" role="region" aria-label="Transcript hash after this message">${esc(shortHexStr(s.transcriptHashHex))}</span>
+      </div>
+      ${bindNote}`;
   return `
     <div class="detail" aria-live="polite" aria-atomic="true">
       <h3>${esc(s.title)} ${lockBadge(s.encrypted)}</h3>
@@ -100,9 +126,14 @@ function detailCard(s: HandshakeStep): string {
       <h4>What happens cryptographically</h4>
       <ul>${s.cryptoOps.map((o) => `<li>${esc(o)}</li>`).join('')}</ul>
       ${keys}
+      ${txChip}
       <h4>Security properties so far</h4>
       <ul>${s.security.map((o) => `<li>${esc(o)}</li>`).join('')}</ul>
     </div>`;
+}
+
+function stepOrdinal(s: HandshakeStep): number {
+  return state.trace.steps.findIndex((x) => x.id === s.id) + 1;
 }
 
 function simulatorSection(t: HandshakeTrace): string {
@@ -130,27 +161,51 @@ function simulatorSection(t: HandshakeTrace): string {
   </section>`;
 }
 
+/** Render two hex strings as byte pairs, highlighting positions where they match. */
+function byteMatchRow(hex: string, otherHex: string): string {
+  const bytes = hex.match(/.{2}/g) ?? [];
+  const others = otherHex.match(/.{2}/g) ?? [];
+  return bytes
+    .map((b, i) => {
+      const same = b === others[i];
+      return `<span class="byte ${same ? 'match' : 'diff'}">${b}</span>`;
+    })
+    .join('');
+}
+
 function keyExchangeSection(t: HandshakeTrace): string {
-  const she = t.steps.find((s) => s.id === 'server-hello');
-  const ecdhe = she?.derived.find((d) => d.name.includes('ECDHE'))?.preview ?? '';
-  const clientPub = t.steps[0].derived[0]?.preview ?? '';
+  const kx = t.keyExchange;
   return `
   <section class="panel">
     <h2><span class="section-num">3</span> Key Exchange — X25519 (EC)DHE</h2>
-    <p class="lead">Client and server each send an <em>ephemeral</em> X25519 public key. Each combines its own private
-      key with the peer's public key and arrives at the identical shared secret — without that secret ever crossing the
-      wire. This is Diffie–Hellman over Curve25519.</p>
+    <p class="lead">Client and server each generate an <em>ephemeral</em>
+      <span class="term" tabindex="0" role="note" aria-label="ECDHE: Elliptic-Curve Diffie–Hellman, Ephemeral — a key agreement where both fresh keypairs are thrown away after the session.">ECDHE</span>
+      keypair. Each combines <strong>its own private key</strong> with <strong>the peer's public key</strong>. The magic
+      of Diffie–Hellman: the two sides start from <em>different</em> private inputs yet compute the <em>identical</em>
+      32-byte secret — and that secret never crosses the wire. Watch the two independently-computed secrets below: every
+      byte matches.</p>
     <div class="two">
       <div class="card client">
-        <div class="role" style="color:var(--client)">CLIENT key_share</div>
-        <p class="mono">X25519 pub: <span class="hl">${esc(clientPub)}</span></p>
+        <div class="role" style="color:var(--client)">CLIENT computes</div>
+        <p class="mono">client_private <span class="masked" title="A real 32-byte secret; masked because it never leaves the client.">•••• (secret, 32 B)</span></p>
+        <p class="mono">server_public <span class="hl">${esc(shortHexStr(kx.serverPublicHex))}</span></p>
+        <p class="mono kx-op">X25519(client_private, server_public) =</p>
+        <div class="secret-bytes" tabindex="0" role="region" aria-label="Client-computed shared secret, 32 bytes">${byteMatchRow(kx.clientSecretHex, kx.serverSecretHex)}</div>
       </div>
       <div class="card server">
-        <div class="role" style="color:var(--server)">SERVER key_share</div>
-        <p class="mono">ECDHE shared: <span class="hl">${esc(ecdhe)}</span></p>
+        <div class="role" style="color:var(--server)">SERVER computes</div>
+        <p class="mono">server_private <span class="masked" title="A real 32-byte secret; masked because it never leaves the server.">•••• (secret, 32 B)</span></p>
+        <p class="mono">client_public <span class="hl">${esc(shortHexStr(kx.clientPublicHex))}</span></p>
+        <p class="mono kx-op">X25519(server_private, client_public) =</p>
+        <div class="secret-bytes" tabindex="0" role="region" aria-label="Server-computed shared secret, 32 bytes">${byteMatchRow(kx.serverSecretHex, kx.clientSecretHex)}</div>
       </div>
     </div>
-    <p class="lead" style="margin-top:0.8rem">${pill(t.sharedSecretAgrees, 'both sides computed the same 32-byte ECDHE secret')}</p>
+    <p class="lead kx-note">The two <strong>private</strong> inputs differ
+      (<span class="mono">${esc(shortHexStr(kx.clientPrivateHex))}</span> vs
+      <span class="mono">${esc(shortHexStr(kx.serverPrivateHex))}</span>) — yet the outputs above are byte-for-byte
+      identical. That is the whole trick, and it is why an eavesdropper who sees only the two public keys still cannot
+      compute the secret.</p>
+    <p class="lead">${pill(kx.agrees, 'both sides independently computed the same 32-byte ECDHE secret')}</p>
     <p class="lead">Modern deployments wrap this in a <strong>hybrid</strong> exchange (X25519 + ML-KEM-768) so the
       session survives a future quantum computer. See
       <a href="https://systemslibrarian.github.io/crypto-lab-pq-tls-handshake/">pq-tls-handshake</a> and
@@ -168,6 +223,14 @@ function authSection(t: HandshakeTrace): string {
            ${pill(mitm.keyExchangeSucceeded, 'attacker completed ECDHE')}
            ${pill(mitm.presentedRealCertificate, 'replayed a valid certificate')}
            ${pill(!mitm.certificateVerifyAccepted, 'forged CertificateVerify rejected', true)}
+         </div>
+         <div class="tx-compare" aria-label="Transcript hashes compared">
+           <div class="tx-cmp-title">Why the forged signature can't fit: the two conversations have different transcript hashes</div>
+           <div class="tx-cmp-row"><span class="tx-cmp-tag good-tag">✓ real client↔server</span>
+             <span class="tx-cmp-hash" tabindex="0" role="region" aria-label="Genuine transcript hash">${esc(shortHexStr(mitm.genuineTranscriptHex))}</span></div>
+           <div class="tx-cmp-row"><span class="tx-cmp-tag bad-tag">✗ client↔attacker</span>
+             <span class="tx-cmp-hash" tabindex="0" role="region" aria-label="Attacker transcript hash">${esc(shortHexStr(mitm.attackerTranscriptHex))}</span></div>
+           <p class="tx-cmp-note">${pill(mitm.transcriptsDiffer, 'transcripts differ → a signature over one is invalid for the other')}</p>
          </div>
          <ol>${mitm.explanation.map((e) => `<li>${esc(e)}</li>`).join('')}</ol>
        </div>`
@@ -220,6 +283,7 @@ function scheduleSection(t: HandshakeTrace): string {
       ${row('Derive', 'server application traffic', k.serverApplicationTrafficSecret, true)}
       ${row('Derive', 'exporter master', k.exporterMasterSecret, true)}
     </div>
+    ${derivationView(t.sampleDerivation)}
     <p class="lead" style="margin-top:0.8rem"><strong>Forward secrecy:</strong> the X25519 private keys are ephemeral —
       generated for this session and discarded the moment it ends. An attacker who later steals the server's long-term
       certificate key still cannot recover these session keys, so recorded traffic stays secret. Contrast with old
@@ -227,19 +291,64 @@ function scheduleSection(t: HandshakeTrace): string {
   </section>`;
 }
 
+/** "Show your work" for one HKDF-Expand-Label: inputs → function → output. */
+function derivationView(d: DerivationView): string {
+  const bar = (hex: string, label: string): string => {
+    const bytes = hex.length / 2;
+    return `<div class="deriv-bar"><span class="deriv-bar-label">${esc(label)}</span>
+      <span class="deriv-bar-track" aria-hidden="true"><span class="deriv-bar-fill" style="width:${Math.min(100, bytes * 3)}%"></span></span>
+      <span class="deriv-bar-len">${bytes} B</span></div>`;
+  };
+  return `
+    <details class="deriv">
+      <summary>Show one derivation in full — how <code>${esc(d.output)}</code> is computed</summary>
+      <div class="deriv-body">
+        <p class="lead">Every secret above is one <strong>HKDF-Expand-Label</strong> call. It takes a parent secret, a
+          short ASCII label, and a context (the transcript hash), and stretches them into a new independent secret.
+          Here is the real call for this session:</p>
+        <div class="deriv-eq">
+          <span class="deriv-fn">HKDF-Expand-Label(</span>
+          <div class="deriv-args">
+            <div class="deriv-arg"><span class="deriv-k">secret</span>
+              <span class="deriv-v">${esc(d.fromSecret)} = <span class="hl">${esc(shortHexStr(d.fromSecretHex))}</span></span></div>
+            <div class="deriv-arg"><span class="deriv-k">label</span>
+              <span class="deriv-v">"<span class="hl">${esc(d.label)}</span>" &nbsp;(on the wire: <span class="mono">tls13 ${esc(d.label)}</span>)</span></div>
+            <div class="deriv-arg"><span class="deriv-k">context</span>
+              <span class="deriv-v">${esc(d.contextDesc)}<br><span class="mono">${esc(shortHexStr(d.contextHex))}</span></span></div>
+            <div class="deriv-arg"><span class="deriv-k">length</span>
+              <span class="deriv-v">${d.outLen} bytes</span></div>
+          </div>
+          <span class="deriv-fn">)</span>
+        </div>
+        ${bar(d.fromSecretHex, 'parent secret')}
+        <div class="deriv-arrow" aria-hidden="true">▼ HKDF</div>
+        <div class="deriv-out"><span class="deriv-k">${esc(d.output)}</span>
+          <span class="deriv-v mono"><span class="hl">${esc(shortHexStr(d.outputHex))}</span></span></div>
+        ${bar(d.outputHex, 'output secret')}
+        <p class="lead deriv-avalanche">Because the label and context are folded into an HMAC, changing a single input
+          bit — flip one bit of the ECDHE secret, or one byte of the transcript — produces a completely different,
+          unrelated output. That avalanche is why each branch of the schedule is independent: learning one secret tells
+          an attacker nothing about its siblings or its parent.</p>
+      </div>
+    </details>`;
+}
+
 function recordSection(t: HandshakeTrace): string {
   const r = t.record;
   return `
   <section class="panel">
     <h2><span class="section-num">6</span> Record Layer — AEAD (AES-128-GCM)</h2>
-    <p class="lead">After the handshake, application data is protected by authenticated encryption. The record key and IV
+    <p class="lead">After the handshake, application data is protected by
+      <span class="term" tabindex="0" role="note" aria-label="AEAD: Authenticated Encryption with Associated Data — one operation that both hides the plaintext and detects any tampering, producing an authentication tag.">AEAD</span>
+      (authenticated encryption). The record key and
+      <span class="term" tabindex="0" role="note" aria-label="IV / nonce: a number used once. TLS 1.3 makes each record's nonce unique by XORing a static write_iv with the record's sequence number, so the same key never encrypts two records under the same nonce.">IV</span>
       are HKDF-derived from the application traffic secret; each record uses a fresh nonce
       (<code>write_iv XOR sequence_number</code>) so a key never reuses a GCM nonce. Below is a real first request,
       sealed with this session's client key.</p>
     <div class="record-grid">
       <div class="field"><label>Plaintext (record 0)</label><div class="codebox">${esc(r.plaintext)}</div></div>
       <div class="field"><label>Per-record nonce (write_iv ⊕ seq 0)</label><div class="codebox">${esc(r.nonceHex)}</div></div>
-      <div class="field"><label>AAD — record header (type ‖ version ‖ length)</label><div class="codebox">${esc(r.aadHex)}</div></div>
+      <div class="field"><label><span class="term" tabindex="0" role="note" aria-label="AAD: Additional Authenticated Data — bytes that are authenticated (protected from tampering) but not encrypted. Here it is the record header, so an attacker cannot alter the declared type, version, or length.">AAD</span> — record header (type ‖ version ‖ length)</label><div class="codebox">${esc(r.aadHex)}</div></div>
       <div class="field"><label>Ciphertext + GCM tag (${r.ciphertextBytes} B)</label><div class="codebox ct">${esc(r.ciphertextHex)}</div></div>
     </div>
     <div class="verdicts" style="margin-top:0.7rem">
@@ -273,7 +382,10 @@ function comparisonSection(): string {
 }
 
 function shortHex(bytes: Uint8Array): string {
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return shortHexStr(Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(''));
+}
+
+function shortHexStr(hex: string): string {
   return hex.length <= 24 ? hex : `${hex.slice(0, 12)}…${hex.slice(-12)}`;
 }
 
@@ -328,7 +440,9 @@ function render(): void {
 }
 
 function go(step: number): void {
-  state.step = Math.max(0, Math.min(state.trace.steps.length - 1, step));
+  const clamped = Math.max(0, Math.min(state.trace.steps.length - 1, step));
+  state.flyDelta = clamped > state.step ? 1 : 0; // only fly on forward moves
+  state.step = clamped;
   render();
 }
 
@@ -379,6 +493,38 @@ function wire(): void {
       go(Number(btn.dataset.step));
     });
   });
+
+  animatePacket();
+}
+
+/**
+ * Fly the current step's packet token along the wire from sender to receiver,
+ * then flash the receiving lane. Respects prefers-reduced-motion: no fly, just a
+ * brief arrival flash so the round-trip structure is still legible.
+ */
+function animatePacket(): void {
+  const row = document.querySelector<HTMLElement>('.msg.current');
+  const packet = row?.querySelector<HTMLElement>('.packet');
+  const dir = packet?.dataset.dir; // 'server' or 'client' — the receiver
+  const flashLane = () => {
+    const lane = document.querySelector<HTMLElement>(dir === 'server' ? '.lane-heads .s' : '.lane-heads .c');
+    lane?.classList.add('flash');
+    window.setTimeout(() => lane?.classList.remove('flash'), 500);
+  };
+  if (!packet || state.flyDelta <= 0) {
+    return;
+  }
+  if (prefersReducedMotion) {
+    flashLane();
+    state.flyDelta = 0;
+    return;
+  }
+  // Restart the CSS keyframe by forcing reflow, then add the animation class.
+  packet.classList.remove('fly');
+  void packet.offsetWidth;
+  packet.classList.add('fly');
+  packet.addEventListener('animationend', flashLane, { once: true });
+  state.flyDelta = 0;
 }
 
 // Global keyboard navigation for the simulator.

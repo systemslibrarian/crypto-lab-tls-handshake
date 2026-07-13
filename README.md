@@ -9,8 +9,10 @@ A browser demo of a complete **TLS 1.3** (RFC 8446) handshake, run entirely in t
 page with no server. It uses genuine cryptographic primitives — **X25519** ephemeral
 key exchange, **Ed25519** certificate-chain and `CertificateVerify` signatures, the
 **HKDF** key schedule (`HKDF-Extract` / `HKDF-Expand-Label` / `Derive-Secret`), HMAC
-`Finished` MACs, and **AES-128-GCM** record protection. It is an honest educational
-simulation of the protocol's message flow and key schedule, not a hardened TLS stack:
+`Finished` MACs, and **AES-128-GCM** record protection. It surfaces the running
+**transcript hash** as a first-class value so you can see exactly what each signature and
+MAC is bound to. It is an honest educational simulation of the protocol's message flow and
+key schedule, not a hardened TLS stack:
 it implements the `(EC)DHE`-only full handshake and deliberately omits PSK/0-RTT,
 HelloRetryRequest, client authentication, and full X.509 parsing.
 
@@ -27,13 +29,22 @@ HelloRetryRequest, client authentication, and full X.509 parsing.
 **[systemslibrarian.github.io/crypto-lab-tls-handshake](https://systemslibrarian.github.io/crypto-lab-tls-handshake/)**
 
 Step through the eight-message handshake one flight at a time (Step / Back / Auto-play,
-arrow keys, or click any message). Each step shows what cryptographic operation runs,
-which keys are derived, and which security property it establishes. A key-exchange
-panel shows both sides reaching the same X25519 secret; an authentication panel
-validates the certificate chain and lets you launch a **MITM attack** that gets blocked;
-the key-schedule panel renders the live HKDF tree; and the record-layer panel encrypts a
-real HTTP request with AES-128-GCM and proves tampering is rejected. Press **New session**
-for fresh ephemeral keys.
+arrow keys, or click any message); a labelled packet flies along the wire, tinted by its
+encryption layer (cleartext / handshake-key / app-key). Each step shows what cryptographic
+operation runs, which keys are derived, and — as a **live transcript-hash chip** — the
+exact SHA-256 that `CertificateVerify` signs and the `Finished` MACs cover, so transcript
+binding is a value you watch change rather than a claim. The **key-exchange panel** shows
+both sides fully: each combines its own (masked) private key with the peer's public key,
+and the two independently-computed 32-byte secrets are stacked with a **byte-level match
+highlight** — different private inputs, byte-identical output, the Diffie–Hellman "aha".
+The authentication panel validates the certificate chain and lets you launch a **MITM
+attack** that gets blocked, now showing the attacker's transcript hash *differing* from the
+genuine one so the signature failure is grounded in a value. The key-schedule panel renders
+the live HKDF tree plus an expandable **"show one derivation in full"** view — inputs →
+`HKDF-Expand-Label(secret, label, context)` → output, with byte-length bars. The
+record-layer panel encrypts a real HTTP request with AES-128-GCM and proves tampering is
+rejected. Inline dotted-underline definitions cover ECDHE, AEAD, AAD, IV/nonce, and the
+transcript hash. Press **New session** for fresh ephemeral keys.
 
 ## How to Run Locally
 
