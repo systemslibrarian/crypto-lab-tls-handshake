@@ -49,6 +49,15 @@ async function driveDemo(page: Page): Promise<void> {
     if (await next.isDisabled().catch(() => false)) break;
     await next.click();
   }
+  // Inject the ECDHE fault. Its verdict row is the one panel that carries a
+  // passing pill and failing pills at the same time (authentication still
+  // holds; both Finished MACs do not), so scanning it covers both pill colours
+  // inside the dashed "faulted" background in a single pass. Re-rendering here
+  // clears any MITM result, so this runs before the attack loop below.
+  await page.locator('.fault-buttons [data-fault="ecdhe"]').click();
+  await expect(page.locator('.fault-panel.faulted')).toBeVisible();
+  await expect(page.locator('.fault-panel .pill')).toHaveCount(4);
+
   // Each strategy trips a different check, so between them they paint every
   // mc-good / mc-neutral state the list can reach. ('relay' is the one the
   // client accepts, and it is scanned last.)

@@ -292,6 +292,28 @@ async function phaseHandshake(): Promise<void> {
   );
   assert(hashOf('server-finished') !== hashOf('certificate-verify'), 'Appending CertificateVerify must move the transcript on');
 
+  // The page's "Break this handshake" controls must produce real failures, not a
+  // relabelled honest run. Each fault is re-run here and every verdict the panel
+  // prints is asserted against what that fault should actually do — including
+  // the checks it must NOT break, since that separation is the lesson.
+  assert(trace.fault === 'none' && trace.faultDetail === '', 'A default run must report no injected fault');
+
+  const ecdhe = await runFullHandshake('example.com', 'ecdhe');
+  assert(!ecdhe.sharedSecretAgrees, 'ecdhe fault: the two ECDHE outputs must differ');
+  assert(!ecdhe.serverFinishedValid, 'ecdhe fault: the client must reject the server Finished');
+  assert(!ecdhe.clientFinishedValid, 'ecdhe fault: the server must reject the client Finished');
+  assert(ecdhe.certificateVerifyValid, 'ecdhe fault: CertificateVerify must still verify — the transcript is untouched');
+  assert(ecdhe.chainVerdict.valid, 'ecdhe fault: the chain must still validate');
+  assert(ecdhe.faultDetail.length > 0, 'ecdhe fault: the panel must describe the injection from the run');
+
+  const tampered = await runFullHandshake('example.com', 'transcript');
+  assert(!tampered.certificateVerifyValid, 'transcript fault: the signature must not fit the transcript the client hashed');
+  assert(!tampered.serverFinishedValid, 'transcript fault: the server Finished MAC must not verify');
+  assert(!tampered.clientFinishedValid, 'transcript fault: the client Finished MAC must not verify');
+  assert(tampered.sharedSecretAgrees, 'transcript fault: ECDHE is untouched, so the secrets must still agree');
+  assert(tampered.chainVerdict.valid, 'transcript fault: the chain itself is untouched, so it must still validate');
+  assert(tampered.faultDetail.length > 0, 'transcript fault: the panel must describe the injection from the run');
+
   // The trace must move through all three flights in order.
   const flights = trace.steps.map((s) => s.flight);
   for (let i = 1; i < flights.length; i += 1) {

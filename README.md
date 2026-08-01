@@ -37,7 +37,17 @@ operation runs, which keys are derived, and — as a **live transcript-hash chip
 exact SHA-256 that `CertificateVerify` signs and the `Finished` MACs cover, so transcript
 binding is a value you watch change rather than a claim. The chip names the run it is a
 hash of (`SHA-256(ClientHello..Certificate)`) rather than the step's ordinal, because a
-signature or MAC necessarily covers the transcript ending just *before* its own message. The **key-exchange panel** shows
+signature or MAC necessarily covers the transcript ending just *before* its own message.
+A **Break this handshake** panel under the ladder re-runs the whole real handshake with a
+fault you choose and reports the four verifier booleans it produced — *break the ECDHE
+agreement* (one bit of the client's X25519 output flipped) or *flip a byte in flight* (one
+byte of `EncryptedExtensions` altered between server and client). The separation is the
+lesson: under the ECDHE fault the chain and `CertificateVerify` still verify — authentication
+proves *who* the peer is, not that you share keys with them — and both `Finished` MACs are
+what catch it; under the in-flight byte flip the client hashes what it received, so the
+server's real signature no longer fits the client's transcript and every transcript-bound
+check fails at once. Each verdict is the return value of the same `verifyFinished` /
+`verifyCertificateVerify` calls the honest run makes. The **key-exchange panel** shows
 both sides fully: each combines its own (masked) private key with the peer's public key,
 and the two independently-computed 32-byte secrets are stacked with a **byte-level match
 highlight** — different private inputs, byte-identical output, the Diffie–Hellman "aha".
@@ -85,7 +95,10 @@ including that each strategy is run against the session's own CertificateVerify 
 — AES-128-GCM round-trip + tamper rejection + per-record nonce uniqueness, a 40-session
 end-to-end agreement loop, a check that each step's transcript chip names (and displays)
 the run of messages its signature or MAC actually covers, a check that `Finished`
-verification fails when the two sides derived from different ECDHE secrets, and a source
+verification fails when the two sides derived from different ECDHE secrets, a gate on each
+"Break this handshake" fault asserting both which verdicts it must flip *and* which it must
+leave alone (the ECDHE fault must not disturb `CertificateVerify`; the in-flight byte flip
+must not disturb chain validation), and a source
 scan that rejects `Math.random`. The same gates
 gate the GitHub Pages deploy (`.github/workflows/deploy.yml`).
 

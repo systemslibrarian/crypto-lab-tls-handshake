@@ -4,6 +4,7 @@ import {
   runFullHandshake,
   runMitmAttempt,
   type HandshakeTrace,
+  type HandshakeFault,
   type HandshakeStep,
   type MitmAttack,
   type MitmResult,
@@ -137,6 +138,63 @@ function detailCard(s: HandshakeStep): string {
     </div>`;
 }
 
+const FAULT_CHOICES: { id: HandshakeFault; label: string; premise: string }[] = [
+  {
+    id: 'none',
+    label: 'Honest session',
+    premise: 'Both sides derive from the same X25519 output over the same transcript.',
+  },
+  {
+    id: 'ecdhe',
+    label: 'Break the ECDHE agreement',
+    premise:
+      'One bit of the client’s X25519 output is flipped, so the two sides run the key schedule from different secrets. The transcripts still agree, so the certificate still authenticates the server — nothing before Finished notices.',
+  },
+  {
+    id: 'transcript',
+    label: 'Flip a byte in flight',
+    premise:
+      'An attacker alters one byte of EncryptedExtensions between server and client. The client hashes what it received, so its transcript diverges from the one the server signed and MAC’d.',
+  },
+];
+
+/**
+ * The two Finished MACs are the handshake's own integrity check, and until the
+ * learner can break something they are a claim rather than a result. Each button
+ * re-runs the whole real handshake with that fault injected; the pills below are
+ * the verifier's own booleans from that run, not a description of it.
+ */
+function integrityPanel(t: HandshakeTrace): string {
+  const choice = FAULT_CHOICES.find((f) => f.id === t.fault) ?? FAULT_CHOICES[0]!;
+  const allOk = t.sharedSecretAgrees && t.certificateVerifyValid && t.serverFinishedValid && t.clientFinishedValid;
+  return `
+    <div class="fault-panel ${t.fault === 'none' ? '' : 'faulted'}">
+      <h3>Break this handshake</h3>
+      <p class="lead">${esc(choice.premise)}</p>
+      <div class="fault-buttons" role="group" aria-label="Inject a fault into the handshake">
+        ${FAULT_CHOICES.map(
+          (f) =>
+            `<button class="btn ${t.fault === f.id ? 'primary' : ''}" data-fault="${f.id}"
+               aria-pressed="${t.fault === f.id}">${esc(f.label)}</button>`,
+        ).join('')}
+      </div>
+      ${t.faultDetail ? `<p class="mono fault-detail">${esc(t.faultDetail)}</p>` : ''}
+      <div class="verdicts" style="margin-top:0.7rem">
+        ${pill(t.sharedSecretAgrees, 'ECDHE outputs agree')}
+        ${pill(t.certificateVerifyValid, 'CertificateVerify verifies over the transcript the client hashed')}
+        ${pill(t.serverFinishedValid, 'client accepts the server Finished MAC')}
+        ${pill(t.clientFinishedValid, 'server accepts the client Finished MAC')}
+      </div>
+      <p class="lead fault-note">${
+        allOk
+          ? 'All four hold, so this session completes. Break one and watch which check reports it — and which ones do not.'
+          : t.fault === 'ecdhe'
+            ? 'Chain validation and CertificateVerify still pass: authentication proves who the peer is, not that you share keys with them. Finished is the check that catches this, and it fails on both sides.'
+            : 'CertificateVerify fails because the signature was made over the server’s transcript, not the client’s — and both Finished MACs fail for the same reason. This is transcript binding doing its job.'
+      }</p>
+    </div>`;
+}
+
 function simulatorSection(t: HandshakeTrace): string {
   const s = t.steps[state.step];
   return `
@@ -162,6 +220,7 @@ function simulatorSection(t: HandshakeTrace): string {
       </div>
       ${detailCard(s)}
     </div>
+    ${integrityPanel(t)}
   </section>`;
 }
 
@@ -570,10 +629,21 @@ function wire(): void {
   });
   document.querySelector('#resetBtn')?.addEventListener('click', async () => {
     stopAuto();
-    state.trace = await runFullHandshake();
+    state.trace = await runFullHandshake(state.trace.serverName, state.trace.fault);
     state.mitm = null;
     state.step = 0;
     render();
+  });
+  document.querySelectorAll<HTMLButtonElement>('.fault-buttons [data-fault]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      stopAuto();
+      // Re-run the real handshake with the fault injected. Nothing about the
+      // verdicts below is precomputed for the fault case — they come back out of
+      // the same verifyFinished / verifyCertificateVerify calls as the honest run.
+      state.trace = await runFullHandshake(state.trace.serverName, btn.dataset.fault as HandshakeFault);
+      state.mitm = null;
+      render();
+    });
   });
   document.querySelector('#autoBtn')?.addEventListener('click', () => {
     if (state.autoPlay) {

@@ -262,8 +262,32 @@ export interface SessionMaterials {
   trustedRootPublicKey: Uint8Array;
 }
 
+/**
+ * A fault the learner can inject into the session, so the two Finished verdicts
+ * and CertificateVerify have a reachable failure branch on the page rather than
+ * only inside the test suite.
+ *
+ *   none        an honest handshake.
+ *   ecdhe       the two sides end up with different X25519 output (a wire fault
+ *               in the key share, or a broken implementation). The transcripts
+ *               still agree, so the certificate still authenticates the server —
+ *               but neither Finished MAC verifies, and that is the check which
+ *               actually catches it.
+ *   transcript  an attacker flips one byte of EncryptedExtensions in flight. The
+ *               client's transcript hash then differs from the server's, so the
+ *               server's real CertificateVerify signature no longer fits the
+ *               hash the client computed, and both Finished MACs disagree too.
+ */
+export type HandshakeFault = 'none' | 'ecdhe' | 'transcript';
+
+export const HANDSHAKE_FAULTS: readonly HandshakeFault[] = ['none', 'ecdhe', 'transcript'];
+
 export interface HandshakeTrace {
   serverName: string;
+  /** Which fault (if any) this run was asked to inject. */
+  fault: HandshakeFault;
+  /** What the injection actually did, in the run's own terms. Empty when none. */
+  faultDetail: string;
   steps: HandshakeStep[];
   schedule: KeySchedule;
   chain: CertChain;
@@ -302,7 +326,17 @@ function keyView(name: string, bytes: Uint8Array): DerivedKeyView {
  * Run a complete, authenticated handshake and produce the full trace, including
  * a real AES-128-GCM application-data record encrypted under the derived keys.
  */
-export async function runFullHandshake(serverName = 'example.com'): Promise<HandshakeTrace> {
+/** Flip the low bit of one byte, returning a copy. Used only to inject faults. */
+function flipBit(bytes: Uint8Array, index: number): Uint8Array {
+  const out = new Uint8Array(bytes);
+  out[index] = (out[index] ?? 0) ^ 0x01;
+  return out;
+}
+
+export async function runFullHandshake(
+  serverName = 'example.com',
+  fault: HandshakeFault = 'none',
+): Promise<HandshakeTrace> {
   // --- Flight 1: ClientHello (client generates an ephemeral X25519 keypair) ---
   const clientKeys: KeyPair = x25519Keygen();
   const clientRandom = randomBytes(32);
@@ -315,7 +349,11 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
 
   // Both sides compute the SAME X25519 shared secret independently.
   const serverShared = x25519SharedSecret(serverKeys.secretKey, clientKeys.publicKey);
-  const clientShared = x25519SharedSecret(clientKeys.secretKey, serverKeys.publicKey);
+  const honestClientShared = x25519SharedSecret(clientKeys.secretKey, serverKeys.publicKey);
+  // The 'ecdhe' fault models the two sides landing on different ECDHE output.
+  // Everything downstream on the client side runs off THIS value, so the effect
+  // propagates through the real key schedule rather than being announced.
+  const clientShared = fault === 'ecdhe' ? flipBit(honestClientShared, 0) : honestClientShared;
   const sharedSecretAgrees = equalBytes(serverShared, clientShared);
 
   // The server's LONG-TERM identity — the same chain across sessions, so the
@@ -327,13 +365,27 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
   const thHello = await sha256(concatBytes(clientHello, serverHello));
 
   const encryptedExtensions = serializeEncryptedExtensions();
+  // The 'transcript' fault is a byte flipped on the wire: the server sent
+  // `encryptedExtensions`, the client received `encryptedExtensionsAsReceived`.
+  // Every client-side transcript hash below is taken over what the client
+  // actually received, which is the whole point of transcript binding.
+  const encryptedExtensionsAsReceived =
+    fault === 'transcript' ? flipBit(encryptedExtensions, 3) : encryptedExtensions;
   const certificate = serializeCertificate(chain);
 
   // CertificateVerify signs Hash(CH..Certificate) with the leaf private key.
   const thForCertVerify = await sha256(concatBytes(clientHello, serverHello, encryptedExtensions, certificate));
   const certVerifySig = signCertificateVerify(thForCertVerify, chain.leafSecretKey);
   const certificateVerify = serializeCertificateVerify(certVerifySig);
-  const certificateVerifyValid = verifyCertificateVerify(thForCertVerify, certVerifySig, chain.leaf.publicKey);
+  // The CLIENT verifies over the transcript IT computed from the bytes it saw.
+  const thForCertVerifyClient = await sha256(
+    concatBytes(clientHello, serverHello, encryptedExtensionsAsReceived, certificate),
+  );
+  const certificateVerifyValid = verifyCertificateVerify(
+    thForCertVerifyClient,
+    certVerifySig,
+    chain.leaf.publicKey,
+  );
 
   // Key schedule needs the app-phase transcript hash too, but that depends on the
   // server Finished, which depends on the handshake secret. So derive handshake
@@ -358,10 +410,19 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
   const serverFinishedData = await finishedMac(sHsBase, thForServerFinished);
   const serverFinished = serializeFinished(serverFinishedData);
   // The CLIENT verifies, using the server handshake traffic secret it derived
-  // itself from its own X25519 output.
+  // itself from its own X25519 output, over the transcript IT assembled.
+  const thForServerFinishedClient = await sha256(
+    concatBytes(
+      clientHello,
+      serverHello,
+      encryptedExtensionsAsReceived,
+      certificate,
+      certificateVerify,
+    ),
+  );
   const serverFinishedValid = await verifyFinished(
     clientProvisional.serverHandshakeTrafficSecret,
-    thForServerFinished,
+    thForServerFinishedClient,
     serverFinishedData,
   );
 
@@ -369,15 +430,25 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
   const thAfterServerFinished = await sha256(
     concatBytes(clientHello, serverHello, encryptedExtensions, certificate, certificateVerify, serverFinished),
   );
+  const thAfterServerFinishedClient = await sha256(
+    concatBytes(
+      clientHello,
+      serverHello,
+      encryptedExtensionsAsReceived,
+      certificate,
+      certificateVerify,
+      serverFinished,
+    ),
+  );
   const schedule = await deriveKeySchedule(serverShared, thHello, thAfterServerFinished);
-  const clientSchedule = await deriveKeySchedule(clientShared, thHello, thAfterServerFinished);
+  const clientSchedule = await deriveKeySchedule(clientShared, thHello, thAfterServerFinishedClient);
 
   // --- Flight 3: client Finished covers Hash(CH..server Finished) ---
-  // Client MACs with its own client handshake traffic secret; the SERVER checks
-  // it with the one the server derived.
+  // Client MACs with its own client handshake traffic secret over its own
+  // transcript; the SERVER checks it with the secret and transcript IT derived.
   const clientFinishedData = await finishedMac(
     clientSchedule.clientHandshakeTrafficSecret,
-    thAfterServerFinished,
+    thAfterServerFinishedClient,
   );
   const clientFinished = serializeFinished(clientFinishedData);
   const clientFinishedValid = await verifyFinished(
@@ -592,8 +663,19 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
     certificateVerify.length +
     serverFinished.length;
 
+  // Describe the injection in the run's own values, so the panel below is not
+  // repeating a canned sentence about what "should" have happened.
+  const faultDetail =
+    fault === 'ecdhe'
+      ? `client ECDHE output ${toHex(clientShared.subarray(0, 4))}… vs server ${toHex(serverShared.subarray(0, 4))}…`
+      : fault === 'transcript'
+        ? `byte 3 of EncryptedExtensions flipped in flight (${encryptedExtensions[3]} → ${encryptedExtensionsAsReceived[3]}); client transcript ${toHex(thForCertVerifyClient.subarray(0, 4))}… vs server ${toHex(thForCertVerify.subarray(0, 4))}…`
+        : '';
+
   return {
     serverName,
+    fault,
+    faultDetail,
     steps,
     schedule,
     chain,

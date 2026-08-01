@@ -540,6 +540,45 @@ a {
   margin-top: 0.6rem;
 }
 
+/* ---- Break this handshake (fault injection) ------------------------------ */
+
+.fault-panel {
+  margin-top: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.9rem;
+  background: color-mix(in srgb, var(--ok) 4%, transparent);
+}
+
+.fault-panel.faulted {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
+  background: color-mix(in srgb, var(--bad) 5%, transparent);
+}
+
+.fault-panel h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.fault-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.fault-detail {
+  margin: 0.6rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.fault-note {
+  margin-top: 0.7rem;
+}
+
 .mitm-box {
   margin-top: 0.9rem;
   border: 1px dashed color-mix(in srgb, var(--bad) 40%, var(--line));
