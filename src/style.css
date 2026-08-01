@@ -562,6 +562,102 @@ a {
   font-size: 0.88rem;
 }
 
+/* ---- MITM: pick the attacker's move -------------------------------------- */
+
+.mitm-choose {
+  margin-top: 0.9rem;
+}
+
+.mitm-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.mitm-checks {
+  list-style: none;
+  margin: 0.8rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.mitm-checks li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-solid);
+  font-size: 0.84rem;
+}
+
+.mc-label {
+  color: var(--ink);
+}
+
+.mc-val {
+  font-family: 'IBM Plex Mono', monospace;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+/* Colour reflects what the answer means for the defender, not the answer. */
+.mc-neutral {
+  color: var(--muted);
+}
+
+.mc-good {
+  color: var(--ok);
+}
+
+.mc-bad {
+  color: var(--bad);
+}
+
+/* ---- Scope panel --------------------------------------------------------- */
+
+.scope-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.7rem;
+  margin-top: 0.9rem;
+}
+
+.scope-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.8rem 0.9rem;
+  background: var(--panel-solid);
+}
+
+.scope-card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.scope-card ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.scope-card li + li {
+  margin-top: 0.4rem;
+}
+
+@media (max-width: 860px) {
+  .scope-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
 .schedule {
   margin-top: 0.8rem;
   display: grid;

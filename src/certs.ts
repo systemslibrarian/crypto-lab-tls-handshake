@@ -53,8 +53,12 @@ function tbsCertificate(subject: string, publicKey: Uint8Array): Uint8Array {
 
 /**
  * Issue a fresh, self-contained chain for `serverName`. The root is self-signed
- * (a trust anchor); the leaf is signed by the root and carries the server's
- * ephemeral-per-session Ed25519 signing key.
+ * (a trust anchor); the leaf is signed by the root and carries an Ed25519
+ * signing key.
+ *
+ * Used directly for parties that legitimately mint their own chain — notably an
+ * attacker that signs with its OWN key. The genuine server does NOT call this
+ * per session; see serverIdentity().
  */
 export function issueChain(serverName: string): CertChain {
   const rootKeys = ed25519Keygen();
@@ -76,6 +80,28 @@ export function issueChain(serverName: string): CertChain {
   };
 
   return { root, leaf, rootPublicKey: rootKeys.publicKey, leafSecretKey: leafKeys.secretKey };
+}
+
+/**
+ * The server's LONG-TERM identity: one root CA and one leaf keypair, minted the
+ * first time a name is used and reused for every session afterwards.
+ *
+ * This exists because the page makes a claim about it. The forward-secrecy
+ * section contrasts the per-session ephemeral X25519 keys with "the server's
+ * long-term certificate key" — a contrast that means nothing if the certificate
+ * key is regenerated every session too. Press "New session" and the leaf public
+ * key shown in the authentication panel stays put while every secret in the key
+ * schedule changes; that is the property being taught, now actually modelled.
+ *
+ * Scope: "long-term" here means the lifetime of the page. Nothing is persisted.
+ */
+let longTermIdentity: { serverName: string; chain: CertChain } | null = null;
+
+export function serverIdentity(serverName: string): CertChain {
+  if (!longTermIdentity || longTermIdentity.serverName !== serverName) {
+    longTermIdentity = { serverName, chain: issueChain(serverName) };
+  }
+  return longTermIdentity.chain;
 }
 
 export interface ChainVerdict {

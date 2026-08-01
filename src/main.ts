@@ -1,9 +1,11 @@
 import './style.css';
 import {
+  MITM_ATTACKS,
   runFullHandshake,
   runMitmAttempt,
   type HandshakeTrace,
   type HandshakeStep,
+  type MitmAttack,
   type MitmResult,
   type DerivationView,
 } from './handshake';
@@ -141,9 +143,12 @@ function simulatorSection(t: HandshakeTrace): string {
   return `
   <section class="panel">
     <h2><span class="section-num">2</span> Interactive Handshake Simulator</h2>
-    <p class="lead">Step through a complete 1-RTT handshake to <code>${esc(t.serverName)}</code>. Each message is real:
-      the keys shown are derived from this session's X25519 secret and message transcript. Click a message, use the
-      Step controls, or press ← / → .</p>
+    <p class="lead">Step through a complete 1-RTT handshake to <code>${esc(t.serverName)}</code>. Every value shown is
+      computed for real — the keys are derived from this session's X25519 secret and the transcript hashes are SHA-256
+      over the actual message bytes. The message framing is real TLS too, with one exception: the
+      <code>Certificate</code> body uses a demo encoding rather than DER X.509, so its byte count is this demo's, not a
+      real chain's. <a href="#scope">Section 8</a> lists what is and is not modelled. Click a message, use the Step
+      controls, or press ← / → .</p>
     <div class="controls">
       <button class="btn" id="prevBtn" aria-label="Previous step">◀ Back</button>
       <button class="btn primary" id="nextBtn" aria-label="Next step">Step ▶</button>
@@ -213,28 +218,67 @@ function keyExchangeSection(t: HandshakeTrace): string {
   </section>`;
 }
 
+/** YES/NO cell whose colour reflects what the value means for the defender. */
+function mitmCheck(label: string, value: boolean, tone: 'neutral' | 'good' | 'bad'): string {
+  return `<li><span class="mc-label">${label}</span><span class="mc-val mc-${tone}">${value ? 'YES' : 'NO'}</span></li>`;
+}
+
+function mitmPanel(t: HandshakeTrace): string {
+  const m = state.mitm;
+  const chooser = `
+    <div class="mitm-choose">
+      <p class="lead">Pick the attacker's move. Each one is run against <strong>this session's</strong> real
+        ClientHello, real certificate chain, and real <code>CertificateVerify</code> signature — the "genuine session"
+        transcript compared below is the same value the Certificate step shows in section 2. Every verdict is the output
+        of the same chain and signature verification the honest handshake runs.</p>
+      <div class="mitm-buttons" role="group" aria-label="Choose the attacker's move">
+        ${MITM_ATTACKS.map(
+          (a) =>
+            `<button class="btn ${m?.attack === a.id ? 'primary' : ''}" data-attack="${a.id}"
+               aria-pressed="${m?.attack === a.id}">${esc(a.label)}</button>`,
+        ).join('')}
+      </div>
+    </div>`;
+  if (!m) {
+    return chooser;
+  }
+  const genuineLeafHex = shortHex(t.chain.leaf.publicKey);
+  const presentedLeafHex = shortHexStr(m.presentedLeafPublicKeyHex);
+  return `${chooser}
+    <div class="mitm-box ${m.attackBlocked ? 'blocked' : ''}">
+      <strong>${m.attackBlocked ? '🛡 attack blocked' : '⚠ ATTACK SUCCEEDED'} — ${esc(m.label)}</strong>
+      <p class="lead">${esc(m.premise)}</p>
+      <p class="mono">certificate the client received: <span class="hl">${esc(m.presentedLeafSubject)}</span>
+        · leaf Ed25519 pub <span class="hl">${esc(presentedLeafHex)}</span>
+        ${presentedLeafHex === genuineLeafHex ? '(the genuine server leaf)' : `(NOT the genuine leaf, which is ${esc(genuineLeafHex)})`}</p>
+      <ul class="mitm-checks">
+        ${mitmCheck('client completed ECDHE with the peer it saw', m.keyExchangeSucceeded, 'neutral')}
+        ${mitmCheck("presented chain validates under the client's trust anchor", m.chainVerdict.valid, m.chainVerdict.valid ? 'neutral' : 'good')}
+        ${mitmCheck('CertificateVerify verifies under the presented leaf key', m.certificateVerifyAccepted, m.certificateVerifyAccepted ? 'neutral' : 'good')}
+        ${mitmCheck('client accepts the handshake', m.clientAccepts, m.clientAccepts ? (m.attackerHoldsSessionSecret ? 'bad' : 'neutral') : 'good')}
+        ${mitmCheck('attacker ends up holding the session secret', m.attackerHoldsSessionSecret, m.attackerHoldsSessionSecret ? (m.clientAccepts ? 'bad' : 'neutral') : 'good')}
+      </ul>
+      <div class="tx-compare" aria-label="Transcript hashes compared">
+        <div class="tx-cmp-title">The transcript <code>CertificateVerify</code> has to be signed over</div>
+        <div class="tx-cmp-row"><span class="tx-cmp-tag good-tag">genuine session (§2, after Certificate)</span>
+          <span class="tx-cmp-hash" tabindex="0" role="region" aria-label="Genuine session transcript hash">${esc(shortHexStr(m.sessionTranscriptHex))}</span></div>
+        <div class="tx-cmp-row"><span class="tx-cmp-tag ${m.transcriptsDiffer ? 'bad-tag' : 'good-tag'}">what this client hashed</span>
+          <span class="tx-cmp-hash" tabindex="0" role="region" aria-label="Transcript hash the attacked client computed">${esc(shortHexStr(m.clientTranscriptHex))}</span></div>
+        <p class="tx-cmp-note">${
+          m.transcriptsDiffer
+            ? 'Different — the attacker changed bytes the transcript hash covers, so a signature over the genuine transcript cannot satisfy this one.'
+            : 'Identical — nothing the transcript hash covers was altered.'
+        }</p>
+        <p class="tx-cmp-note">Forwarding the server's own <code>CertificateVerify</code> here:
+          <strong>${m.replayedSignatureAccepted ? 'would be accepted' : 'is rejected'}</strong>.</p>
+      </div>
+      <ol>${m.explanation.map((e) => `<li>${esc(e)}</li>`).join('')}</ol>
+    </div>`;
+}
+
 function authSection(t: HandshakeTrace): string {
   const v = t.chainVerdict;
-  const mitm = state.mitm;
-  const mitmHtml = mitm
-    ? `<div class="mitm-box ${mitm.attackBlocked ? 'blocked' : ''}">
-         <strong>${mitm.attackBlocked ? '🛡 MITM blocked' : '⚠ MITM SUCCEEDED'}</strong>
-         <div class="verdicts">
-           ${pill(mitm.keyExchangeSucceeded, 'attacker completed ECDHE')}
-           ${pill(mitm.presentedRealCertificate, 'replayed a valid certificate')}
-           ${pill(!mitm.certificateVerifyAccepted, 'forged CertificateVerify rejected', true)}
-         </div>
-         <div class="tx-compare" aria-label="Transcript hashes compared">
-           <div class="tx-cmp-title">Why the forged signature can't fit: the two conversations have different transcript hashes</div>
-           <div class="tx-cmp-row"><span class="tx-cmp-tag good-tag">✓ real client↔server</span>
-             <span class="tx-cmp-hash" tabindex="0" role="region" aria-label="Genuine transcript hash">${esc(shortHexStr(mitm.genuineTranscriptHex))}</span></div>
-           <div class="tx-cmp-row"><span class="tx-cmp-tag bad-tag">✗ client↔attacker</span>
-             <span class="tx-cmp-hash" tabindex="0" role="region" aria-label="Attacker transcript hash">${esc(shortHexStr(mitm.attackerTranscriptHex))}</span></div>
-           <p class="tx-cmp-note">${pill(mitm.transcriptsDiffer, 'transcripts differ → a signature over one is invalid for the other')}</p>
-         </div>
-         <ol>${mitm.explanation.map((e) => `<li>${esc(e)}</li>`).join('')}</ol>
-       </div>`
-    : `<button class="btn" id="mitmBtn" style="margin-top:0.9rem" aria-label="Simulate a man in the middle attack">▶ Simulate a MITM attack</button>`;
+  const mitmHtml = mitmPanel(t);
 
   return `
   <section class="panel">
@@ -256,7 +300,9 @@ function authSection(t: HandshakeTrace): string {
       ${pill(t.certificateVerifyValid, 'CertificateVerify signature valid')}
     </div>
     <p class="lead" style="margin-top:0.7rem">Each check is reported independently, so a failure points at the exact
-      broken link. Now watch what happens when an attacker tries to impersonate the server:</p>
+      broken link. The leaf key above is the server's <strong>long-term</strong> identity: press <em>New session</em> and
+      it stays put while every ephemeral key and derived secret changes. Now watch what happens when an attacker sits in
+      the middle:</p>
     ${mitmHtml}
   </section>`;
 }
@@ -285,9 +331,12 @@ function scheduleSection(t: HandshakeTrace): string {
     </div>
     ${derivationView(t.sampleDerivation)}
     <p class="lead" style="margin-top:0.8rem"><strong>Forward secrecy:</strong> the X25519 private keys are ephemeral —
-      generated for this session and discarded the moment it ends. An attacker who later steals the server's long-term
-      certificate key still cannot recover these session keys, so recorded traffic stays secret. Contrast with old
-      RSA key-transport (TLS ≤1.2), where the long-term key decrypts every past session it ever protected.</p>
+      generated for this session and discarded the moment it ends. The server's <strong>long-term</strong> key is the
+      Ed25519 leaf key in section 4, which persists across sessions here (press <em>New session</em> and watch it stay
+      the same while every secret above changes). An attacker who later steals that key still cannot recover these
+      session keys: it is a <em>signing</em> key, and the only secret this schedule extracts from is the ephemeral
+      X25519 output. Contrast with old RSA key-transport (TLS ≤1.2), where the long-term key <em>was</em> the decryption
+      key and recovered every past session it ever protected.</p>
   </section>`;
 }
 
@@ -381,6 +430,70 @@ function comparisonSection(): string {
   </section>`;
 }
 
+/**
+ * Honest scope panel. These disclosures used to live only in the README and in
+ * source comments while the page itself said "each message is real" — so a
+ * learner reading the screen had no way to know the certificate chain is not
+ * X.509, that no hostname is ever checked, or that the handshake messages are
+ * framed but not separately sealed. Matches the SCOPE cards in the sibling
+ * crypto-lab-ssh-handshake demo.
+ */
+const SCOPE: { heading: string; bullets: string[] }[] = [
+  {
+    heading: 'What this models faithfully',
+    bullets: [
+      'X25519 (EC)DHE key agreement and Ed25519 signatures — real @noble/curves implementations, verified for real.',
+      'The RFC 8446 §7.1 key schedule: HKDF-Extract, HKDF-Expand-Label, Derive-Secret. Checked against the RFC 8448 test vectors in the build gates.',
+      'Transcript hashes taken as SHA-256 over the actual concatenated handshake-message bytes, and used as the real context input to the schedule.',
+      'The RFC 8446 §4.4.3 CertificateVerify content: 64 octets of 0x20, the context string, 0x00, then the transcript hash.',
+      'HMAC Finished verify_data over the running transcript, and AES-128-GCM record protection with the write_iv ⊕ sequence-number nonce and the record header as AAD.',
+      'TLS handshake-message framing (type ‖ 3-byte length) and the real ClientHello / ServerHello body and extension encoding.',
+    ],
+  },
+  {
+    heading: 'What this deliberately does NOT model',
+    bullets: [
+      'X.509. The Certificate message carries a demo-specific body — subject ‖ issuer ‖ public key ‖ signature, each a length-prefixed vector — not DER-encoded certificates. The "bytes on the wire" figure for that step is therefore this demo\'s encoding; a real chain is several times larger.',
+      'Hostname / SAN verification. Nothing checks that the certificate names the host you connected to. Chain validation here is exactly three things: the root matches the trust anchor, the root self-signature verifies, and the leaf is signed by the root.',
+      'Certificate validity periods, key usage / extended key usage, name constraints, path length, and revocation (CRL, OCSP, stapling). None of them exist in this model.',
+      'A real trust store. The trust anchor is a root generated in this page, not one shipped by your browser or OS.',
+      'PSK and session resumption, 0-RTT early data, HelloRetryRequest, client certificate authentication, ALPN/SNI handling, post-handshake messages, and KeyUpdate.',
+      'Algorithm negotiation. One cipher suite (TLS_AES_128_GCM_SHA256) and one group (x25519); nothing is chosen or downgraded.',
+      'Constant-time execution. This is JavaScript in a browser and makes no side-channel guarantees.',
+    ],
+  },
+  {
+    heading: 'Where exactness is compressed for teaching',
+    bullets: [
+      'Only the application-data record is actually AEAD-sealed. Messages badged "🔒 handshake key" are computed and framed for real, and their contents really are what a TLS 1.3 server would send at that point, but they are not separately encrypted into records here — the badge describes the layer they belong to, not an encryption step this demo performed.',
+      'The server\'s "long-term" Ed25519 leaf key persists for the lifetime of the page, not across reloads. Nothing is stored.',
+      'Both endpoints run in the same JavaScript context. There is no network, no record fragmentation, and no timing behaviour to observe.',
+      'The MITM exhibit attacks this session\'s real material: the real ClientHello, the real EncryptedExtensions, the real chain, and the real CertificateVerify signature. The transcript hashes it compares are SHA-256 over the bytes each party actually received, and every verdict is the output of the same verification the honest handshake runs.',
+    ],
+  },
+];
+
+function scopeSection(): string {
+  return `
+  <section class="panel" id="scope">
+    <h2><span class="section-num">8</span> Scope — What This Demo Does and Does Not Model</h2>
+    <p class="lead">The cryptography here is real, which is exactly why the boundaries need stating: a demo that looks
+      like TLS is easy to mistake for TLS. Everything below describes this page, not the protocol.</p>
+    <div class="scope-cards">
+      ${SCOPE.map(
+        (c) => `
+      <div class="scope-card">
+        <h3>${esc(c.heading)}</h3>
+        <ul>${c.bullets.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>
+      </div>`,
+      ).join('')}
+    </div>
+    <p class="lead">For full certificate-path work — X.509 parsing, validity, name constraints, revocation — see
+      <a href="https://systemslibrarian.github.io/crypto-lab-pki-chain/">pki-chain</a>. For a hybrid post-quantum
+      handshake, see <a href="https://systemslibrarian.github.io/crypto-lab-pq-tls-handshake/">pq-tls-handshake</a>.</p>
+  </section>`;
+}
+
 function shortHex(bytes: Uint8Array): string {
   return shortHexStr(Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(''));
 }
@@ -433,6 +546,7 @@ function render(): void {
       ${scheduleSection(t)}
       ${recordSection(t)}
       ${comparisonSection()}
+      ${scopeSection()}
     </main>
     ${footer()}`;
 
@@ -483,9 +597,13 @@ function wire(): void {
     }, 1500);
     render();
   });
-  document.querySelector('#mitmBtn')?.addEventListener('click', async () => {
-    state.mitm = await runMitmAttempt(state.trace.serverName);
-    render();
+  document.querySelectorAll<HTMLButtonElement>('.mitm-buttons [data-attack]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      // Attacks run against the CURRENT session's own material, so the panel and
+      // the walkthrough above are always describing the same conversation.
+      state.mitm = await runMitmAttempt(state.trace.sessionMaterials, btn.dataset.attack as MitmAttack);
+      render();
+    });
   });
   document.querySelectorAll<HTMLButtonElement>('.msg[data-step]').forEach((btn) => {
     btn.addEventListener('click', () => {

@@ -14,13 +14,14 @@ key exchange, **Ed25519** certificate-chain and `CertificateVerify` signatures, 
 MAC is bound to. It is an honest educational simulation of the protocol's message flow and
 key schedule, not a hardened TLS stack:
 it implements the `(EC)DHE`-only full handshake and deliberately omits PSK/0-RTT,
-HelloRetryRequest, client authentication, and full X.509 parsing.
+HelloRetryRequest, client authentication, X.509 encoding, and every name/validity/revocation
+check a real client performs. The page states those boundaries itself, in a Scope panel.
 
 ## When to Use It
 
 - **Teaching how a real handshake fits together** — students who learned Diffie–Hellman, signatures, and AEAD in isolation can see them combine into one protocol.
-- **Showing why authentication, not key exchange, stops a MITM** — the built-in attack panel demonstrates an attacker completing key exchange yet failing to forge `CertificateVerify`.
-- **Explaining forward secrecy concretely** — ephemeral X25519 keys are generated per session and discarded, so the key schedule visibly does not depend on any long-term secret.
+- **Showing why authentication, not key exchange, stops a MITM** — the attack panel runs three different attacker strategies against the *current session's* real chain and real transcript, and shows which check each one trips: reusing the server's certificate fails the signature, signing with the attacker's own key fails the trust anchor, and relaying unchanged passes every check while gaining the attacker nothing.
+- **Explaining forward secrecy concretely** — the server's Ed25519 certificate key persists across sessions while the X25519 keys are generated per session and discarded, so you can press *New session* and watch the long-term key stay put while every derived secret changes.
 - **Walking the TLS 1.3 key schedule** — every secret in the RFC 8446 §7.1 tree is shown as the real HKDF output for the current session.
 - **Do NOT use it as a TLS library.** It is an educational tool; JavaScript here is not constant-time and the chain validation is intentionally minimal. For production, use a vetted TLS implementation.
 
@@ -37,14 +38,24 @@ binding is a value you watch change rather than a claim. The **key-exchange pane
 both sides fully: each combines its own (masked) private key with the peer's public key,
 and the two independently-computed 32-byte secrets are stacked with a **byte-level match
 highlight** — different private inputs, byte-identical output, the Diffie–Hellman "aha".
-The authentication panel validates the certificate chain and lets you launch a **MITM
-attack** that gets blocked, now showing the attacker's transcript hash *differing* from the
-genuine one so the signature failure is grounded in a value. The key-schedule panel renders
+The authentication panel validates the certificate chain and lets you choose the
+attacker's move in a **MITM panel** — *reuse the server's certificate*, *sign with its own
+key*, or *relay unchanged*. Each runs against this session's own ClientHello, chain, and
+`CertificateVerify` signature, so the "genuine session" transcript it compares against is
+literally the value the Certificate step shows above; every verdict is the output of the
+same chain and signature verification the honest handshake runs, and the panel reports
+separately whether the client accepted and whether the attacker ended up holding the
+session secret. The key-schedule panel renders
 the live HKDF tree plus an expandable **"show one derivation in full"** view — inputs →
 `HKDF-Expand-Label(secret, label, context)` → output, with byte-length bars. The
 record-layer panel encrypts a real HTTP request with AES-128-GCM and proves tampering is
 rejected. Inline dotted-underline definitions cover ECDHE, AEAD, AAD, IV/nonce, and the
-transcript hash. Press **New session** for fresh ephemeral keys.
+transcript hash. Press **New session** for fresh ephemeral keys — the server's long-term
+leaf key stays the same. A closing **Scope** panel states in the page itself what is
+modelled faithfully and what is not: the certificate chain is not X.509 (so the
+`Certificate` step's byte count is this demo's encoding), no hostname/SAN, validity, or
+revocation check exists, PSK/0-RTT/HelloRetryRequest are omitted, nothing is negotiated,
+and only the application-data record is actually AEAD-sealed.
 
 ## How to Run Locally
 
@@ -65,8 +76,10 @@ npm run build       # type-check + production bundle
 
 `npm test` runs `scripts/phase-checks.ts`: the RFC 8448 `HKDF-Expand-Label`/Early-Secret
 vectors, a deterministic distinct-secrets key-schedule check, certificate-chain
-accept/reject and `CertificateVerify` forge-rejection, the MITM-blocked invariant,
-AES-128-GCM round-trip + tamper rejection + per-record nonce uniqueness, a 40-session
+accept/reject and `CertificateVerify` forge-rejection, a long-term-identity check (the leaf
+key survives a new session, the session secrets do not), per-strategy MITM invariants —
+including that each strategy is run against the session's own CertificateVerify transcript
+— AES-128-GCM round-trip + tamper rejection + per-record nonce uniqueness, a 40-session
 end-to-end agreement loop, and a source scan that rejects `Math.random`. The same gates
 gate the GitHub Pages deploy (`.github/workflows/deploy.yml`).
 

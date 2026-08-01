@@ -27,6 +27,7 @@ import {
   x25519SharedSecret,
   aesGcmDecrypt,
   aesGcmEncrypt,
+  ed25519Keygen,
   randomBytes,
   type KeyPair,
 } from './primitives';
@@ -41,6 +42,7 @@ import {
 import {
   certificateVerifyContent,
   issueChain,
+  serverIdentity,
   signCertificateVerify,
   verifyCertificateVerify,
   verifyChain,
@@ -218,6 +220,39 @@ export interface RecordDemo {
   tamperRejected: boolean;
 }
 
+/**
+ * Everything the MITM exhibit needs to attack THIS session rather than a
+ * freshly-invented one: the actual bytes each party sent, the actual keys, and
+ * the actual certificate chain and CertificateVerify signature.
+ *
+ * This is deliberately the session's own material. An earlier version ran the
+ * MITM against a brand-new keypair and a brand-new chain and then labelled a
+ * three-field hash of (client_pk ‖ server_pk ‖ serverName) "the real
+ * client↔server transcript" — naming a conversation that never happened, using
+ * a value that was not a TLS transcript.
+ */
+export interface SessionMaterials {
+  serverName: string;
+  /** The exact ClientHello bytes this session sent. */
+  clientHello: Uint8Array;
+  /** The client's ephemeral X25519 keypair for this session. */
+  clientKeys: KeyPair;
+  /** The genuine server's ephemeral X25519 public key. */
+  serverPublicKey: Uint8Array;
+  /** The exact ServerHello bytes the genuine server sent. */
+  serverHello: Uint8Array;
+  encryptedExtensions: Uint8Array;
+  /** The exact Certificate message bytes carrying the genuine chain. */
+  certificate: Uint8Array;
+  chain: CertChain;
+  /** Hash(ClientHello..Certificate) — the value CertificateVerify really signed. */
+  certVerifyTranscript: Uint8Array;
+  /** The genuine CertificateVerify signature over that transcript. */
+  certVerifySignature: Uint8Array;
+  /** The root key the client trusts. */
+  trustedRootPublicKey: Uint8Array;
+}
+
 export interface HandshakeTrace {
   serverName: string;
   steps: HandshakeStep[];
@@ -239,6 +274,8 @@ export interface HandshakeTrace {
   certVerifyTranscriptHex: string;
   /** One fully decomposed HKDF derivation, for the schedule "show your work" view. */
   sampleDerivation: DerivationView;
+  /** The real bytes/keys of this session, for the MITM exhibit to attack. */
+  sessionMaterials: SessionMaterials;
 }
 
 function preview(bytes: Uint8Array, head = 6, tail = 6): string {
@@ -272,7 +309,10 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
   const clientShared = x25519SharedSecret(clientKeys.secretKey, serverKeys.publicKey);
   const sharedSecretAgrees = equalBytes(serverShared, clientShared);
 
-  const chain = issueChain(serverName);
+  // The server's LONG-TERM identity — the same chain across sessions, so the
+  // forward-secrecy contrast in the UI ("ephemeral keys vs the long-term
+  // certificate key") describes something that is actually long-term.
+  const chain = serverIdentity(serverName);
 
   // Transcript hashes are taken over the running handshake-message concatenation.
   const thHello = await sha256(concatBytes(clientHello, serverHello));
@@ -538,6 +578,19 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
     keyExchange,
     certVerifyTranscriptHex: toHex(thForCertVerify),
     sampleDerivation,
+    sessionMaterials: {
+      serverName,
+      clientHello,
+      clientKeys,
+      serverPublicKey: serverKeys.publicKey,
+      serverHello,
+      encryptedExtensions,
+      certificate,
+      chain,
+      certVerifyTranscript: thForCertVerify,
+      certVerifySignature: certVerifySig,
+      trustedRootPublicKey: chain.rootPublicKey,
+    },
   };
 }
 
@@ -585,85 +638,184 @@ async function encryptApplicationRecord(keys: TrafficKeys, message: string): Pro
 
 // ---- Man-in-the-middle demonstration ---------------------------------------
 
+/** The three moves available to an attacker sitting between client and server. */
+export type MitmAttack = 'reuse-cert' | 'own-key' | 'relay';
+
+export const MITM_ATTACKS: { id: MitmAttack; label: string; premise: string }[] = [
+  {
+    id: 'reuse-cert',
+    label: "Reuse the server's certificate",
+    premise:
+      "The attacker terminates the connection with its own key share, then replays the genuine, root-signed certificate it copied off the wire. It does not have the leaf private key, so it signs CertificateVerify with a key it does control.",
+  },
+  {
+    id: 'own-key',
+    label: 'Sign with its own key',
+    premise:
+      'The attacker mints its own root and leaf (anyone can be a CA), presents that chain, and signs CertificateVerify correctly with its own leaf private key.',
+  },
+  {
+    id: 'relay',
+    label: 'Relay unchanged',
+    premise:
+      "The attacker forwards the server's flight byte-for-byte and injects nothing. The client sees exactly the genuine conversation.",
+  },
+];
+
 export interface MitmResult {
-  /** Attacker completes ECDHE with the client (it always can — keys are public). */
+  attack: MitmAttack;
+  label: string;
+  premise: string;
+  /** The client completed ECDHE with whatever peer it saw — always possible. */
   keyExchangeSucceeded: boolean;
-  /** Attacker presents the REAL leaf cert it copied off the wire. Chain still validates. */
-  presentedRealCertificate: boolean;
-  /** Attacker has no leaf private key, so its CertificateVerify must fail. */
-  certificateVerifyForged: boolean;
+  /** The chain the attacker presented, checked against the CLIENT's trust anchor. */
+  chainVerdict: ChainVerdict;
+  /** Subject on the leaf the client received, and its public key. */
+  presentedLeafSubject: string;
+  presentedLeafPublicKeyHex: string;
+  /** Hash(ClientHello..Certificate) over the bytes the CLIENT actually received. */
+  clientTranscriptHex: string;
+  /** Hash(ClientHello..Certificate) of the genuine session (shown in section 2). */
+  sessionTranscriptHex: string;
+  transcriptsDiffer: boolean;
+  /** Did the CertificateVerify the client received verify under the presented leaf key? */
   certificateVerifyAccepted: boolean;
-  /** The connection is only safe if the forged auth is rejected. */
+  /** Would forwarding the server's genuine signature have satisfied this transcript? */
+  replayedSignatureAccepted: boolean;
+  /** Everything the client checks, ANDed. */
+  clientAccepts: boolean;
+  /** Does the attacker end up holding the same secret the client derived? */
+  attackerHoldsSessionSecret: boolean;
+  /** Safe iff the client refuses, or the attacker never gets the session secret. */
   attackBlocked: boolean;
   explanation: string[];
-  /** Transcript hash of the genuine client<->server conversation. */
-  genuineTranscriptHex: string;
-  /** Transcript hash of the client<->attacker conversation — a DIFFERENT value. */
-  attackerTranscriptHex: string;
-  /** True: the two transcripts differ, so a signature over one can't satisfy the other. */
-  transcriptsDiffer: boolean;
 }
 
 /**
- * Model an active MITM. The attacker terminates the client's connection, does a
- * fresh ECDHE (trivially possible — public keys are public), and replays the
- * genuine server certificate it observed. The one thing it cannot do is sign the
- * CertificateVerify over the live transcript with the leaf's private key. The
- * client's signature check therefore fails and the handshake aborts.
+ * Run one attacker strategy against THIS session's real material.
+ *
+ * The client's ClientHello, the genuine EncryptedExtensions, the genuine chain
+ * and the genuine CertificateVerify signature all come from `materials`, so the
+ * "real" transcript shown here is the same value section 2 displays after the
+ * Certificate step — not a separate invention. Every verdict below is the
+ * output of the same verifyChain / verifyCertificateVerify the honest handshake
+ * runs, over the bytes each party actually saw.
  */
-export async function runMitmAttempt(serverName = 'example.com'): Promise<MitmResult> {
-  const chain = issueChain(serverName);
+export async function runMitmAttempt(
+  materials: SessionMaterials,
+  attack: MitmAttack = 'reuse-cert',
+): Promise<MitmResult> {
+  const { clientHello, clientKeys, encryptedExtensions, chain, trustedRootPublicKey } = materials;
+  const meta = MITM_ATTACKS.find((a) => a.id === attack) ?? MITM_ATTACKS[0];
 
-  // Client and attacker complete an ECDHE just fine.
-  const client = x25519Keygen();
-  const attacker = x25519Keygen();
-  const server = x25519Keygen();
-  const attackerShared = x25519SharedSecret(attacker.secretKey, client.publicKey);
-  const keyExchangeSucceeded = attackerShared.length === 32;
+  // The attacker holds two keys of two DIFFERENT types, because they do two
+  // different jobs: an ephemeral X25519 keypair to complete key exchange, and an
+  // Ed25519 keypair to sign with. (An earlier version passed the X25519 secret
+  // to ed25519Sign; it only "worked" because both are 32 random bytes.)
+  const attackerEphemeral = x25519Keygen();
+  const attackerSigning = ed25519Keygen();
+  const attackerRandom = randomBytes(32);
 
-  // Two DIFFERENT conversations happen: the genuine client<->server transcript,
-  // and the client<->attacker transcript. Because the attacker injected its own
-  // ephemeral key_share, the two transcript hashes differ — so a signature over
-  // one is meaningless against the other. This is the concrete reason MITM fails.
-  const genuineTranscript = await sha256(concatBytes(client.publicKey, server.publicKey, utf8(serverName)));
-  const attackerTranscript = await sha256(concatBytes(client.publicKey, attacker.publicKey, utf8(serverName)));
-  const transcriptsDiffer = !equalBytes(genuineTranscript, attackerTranscript);
+  // Relaying means the attacker changes nothing, so the client sees the genuine
+  // ServerHello and the genuine server's key share. Every other move means the
+  // attacker terminates the connection and substitutes its own.
+  const relaying = attack === 'relay';
+  const serverHelloSeen = relaying
+    ? materials.serverHello
+    : serializeServerHello(attackerRandom, attackerEphemeral.publicKey);
+  const peerPublicKey = relaying ? materials.serverPublicKey : attackerEphemeral.publicKey;
 
-  // The transcript the client will actually verify the signature against is the
-  // attacker-side one (that is the conversation the client had).
-  const transcriptHash = attackerTranscript;
+  // Which certificate chain reaches the client.
+  const presentedChain: CertChain = attack === 'own-key' ? issueChain(materials.serverName) : chain;
+  const certificateSeen = relaying ? materials.certificate : serializeCertificate(presentedChain);
 
-  // Attacker copies the real leaf certificate (public). The chain validates,
-  // because the certificate itself is genuine and root-signed.
-  const presentedRealCertificate = verifyChain(chain, chain.rootPublicKey).valid;
+  // The transcript the CLIENT hashes is over the bytes the CLIENT received.
+  const clientTranscript = await sha256(
+    concatBytes(clientHello, serverHelloSeen, encryptedExtensions, certificateSeen),
+  );
 
-  // But the attacker lacks the leaf private key. Its best move is to sign with
-  // its OWN key — which won't verify against the leaf's public key.
-  const forgedSig = signCertificateVerify(transcriptHash, attacker.secretKey);
-  const certificateVerifyAccepted = verifyCertificateVerify(transcriptHash, forgedSig, chain.leaf.publicKey);
+  // The CertificateVerify signature that reaches the client.
+  let signatureSeen: Uint8Array;
+  if (attack === 'own-key') {
+    // Correctly signed — over the live transcript, with the attacker's own leaf key.
+    signatureSeen = signCertificateVerify(clientTranscript, presentedChain.leafSecretKey);
+  } else if (relaying) {
+    signatureSeen = materials.certVerifySignature;
+  } else {
+    // Holds the genuine certificate, not its private key. Signs with what it has.
+    signatureSeen = signCertificateVerify(clientTranscript, attackerSigning.secretKey);
+  }
 
-  // Sanity: the genuine private key WOULD have verified, proving the check works.
-  const genuineSig = signCertificateVerify(transcriptHash, chain.leafSecretKey);
-  const genuineWouldVerify = verifyCertificateVerify(transcriptHash, genuineSig, chain.leaf.publicKey);
+  // --- the client's checks, run for real -----------------------------------
+  const chainVerdict = verifyChain(presentedChain, trustedRootPublicKey);
+  const certificateVerifyAccepted = verifyCertificateVerify(
+    clientTranscript,
+    signatureSeen,
+    presentedChain.leaf.publicKey,
+  );
+  // Could the attacker simply have forwarded the server's genuine signature?
+  const replayedSignatureAccepted = verifyCertificateVerify(
+    clientTranscript,
+    materials.certVerifySignature,
+    chain.leaf.publicKey,
+  );
+  const clientAccepts = chainVerdict.valid && certificateVerifyAccepted;
 
-  const attackBlocked = !certificateVerifyAccepted && genuineWouldVerify;
+  // Key exchange always completes; the question is who ends up holding the key.
+  const clientSecret = x25519SharedSecret(clientKeys.secretKey, peerPublicKey);
+  const attackerSecret = x25519SharedSecret(attackerEphemeral.secretKey, clientKeys.publicKey);
+  const keyExchangeSucceeded = clientSecret.length === 32;
+  const attackerHoldsSessionSecret = equalBytes(clientSecret, attackerSecret);
+
+  const transcriptsDiffer = !equalBytes(clientTranscript, materials.certVerifyTranscript);
+  const attackBlocked = !clientAccepts || !attackerHoldsSessionSecret;
+
+  const explanation: string[] = [
+    meta.premise,
+    `ECDHE completes either way — public keys are public. Here the attacker ${
+      attackerHoldsSessionSecret
+        ? 'does hold the same 32-byte secret the client derived, so key exchange alone would have handed it the session.'
+        : 'does NOT hold the secret the client derived: it never injected a key share, so the client agreed its secret with the real server.'
+    }`,
+    `The transcript the client hashes ${
+      transcriptsDiffer
+        ? 'differs from the genuine session transcript, because the attacker changed bytes the hash covers.'
+        : 'is byte-identical to the genuine session transcript, because nothing the hash covers was changed.'
+    } Forwarding the server's real CertificateVerify would therefore ${
+      replayedSignatureAccepted ? 'have satisfied this transcript.' : 'NOT have satisfied it.'
+    }`,
+    `Chain check against the client's trust anchor: ${
+      chainVerdict.valid ? 'PASSES' : 'FAILS'
+    } (anchor matches: ${chainVerdict.trustAnchorMatches}, root self-signature: ${
+      chainVerdict.rootSelfSignatureValid
+    }, leaf signed by root: ${chainVerdict.leafSignatureValid}).`,
+    `CertificateVerify check against the presented leaf key: ${
+      certificateVerifyAccepted ? 'PASSES' : 'FAILS'
+    }.`,
+    clientAccepts
+      ? attackerHoldsSessionSecret
+        ? 'The client accepts AND the attacker holds the session secret — this attack would succeed.'
+        : 'The client accepts, but the attacker holds nothing: relaying without altering the handshake makes it a wire, not a listener. The moment it changes anything the hash covers, the checks above start failing.'
+      : 'The client rejects the handshake, so the attacker never reaches the application data.',
+  ];
 
   return {
+    attack,
+    label: meta.label,
+    premise: meta.premise,
     keyExchangeSucceeded,
-    presentedRealCertificate,
-    certificateVerifyForged: true,
-    certificateVerifyAccepted,
-    attackBlocked,
-    genuineTranscriptHex: toHex(genuineTranscript),
-    attackerTranscriptHex: toHex(attackerTranscript),
+    chainVerdict,
+    presentedLeafSubject: presentedChain.leaf.subject,
+    presentedLeafPublicKeyHex: toHex(presentedChain.leaf.publicKey),
+    clientTranscriptHex: toHex(clientTranscript),
+    sessionTranscriptHex: toHex(materials.certVerifyTranscript),
     transcriptsDiffer,
-    explanation: [
-      'Key exchange with the attacker succeeds — ephemeral public keys are public, so ECDHE alone proves nothing.',
-      'The attacker even replays the real, root-signed server certificate, so chain validation passes.',
-      'CertificateVerify is the trap: it must be signed over THIS transcript with the leaf private key.',
-      'The attacker has no leaf private key, so its signature fails verification and the client aborts.',
-      'Lesson: authentication (signatures), not key exchange, is what binds the session to the real server.',
-    ],
+    certificateVerifyAccepted,
+    replayedSignatureAccepted,
+    clientAccepts,
+    attackerHoldsSessionSecret,
+    attackBlocked,
+    explanation,
   };
 }
 

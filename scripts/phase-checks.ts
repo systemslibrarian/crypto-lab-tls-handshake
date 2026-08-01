@@ -156,11 +156,71 @@ async function phaseAuth(): Promise<void> {
   const m2 = Uint8Array.from(m); m2[0] ^= 1;
   assert(!ed25519Verify(s, m2, k.publicKey), 'Ed25519 must reject a tampered message');
 
-  // MITM is blocked precisely because the attacker cannot forge CertificateVerify.
-  const mitm = await runMitmAttempt('example.com');
-  assert(mitm.keyExchangeSucceeded, 'MITM ECDHE should succeed (proves key exchange alone is insufficient)');
-  assert(!mitm.certificateVerifyAccepted, 'MITM forged CertificateVerify must be rejected');
-  assert(mitm.attackBlocked, 'MITM attack must be blocked by authentication');
+  // --- The server's certificate key must actually be LONG-TERM --------------
+  // Section 5 tells the reader that an attacker who later steals the server's
+  // long-term certificate key still cannot recover past session keys. That claim
+  // is empty if the certificate key is minted fresh every session, so assert the
+  // model has one identity and many sessions.
+  const sessionA = await runFullHandshake('longterm.example');
+  const sessionB = await runFullHandshake('longterm.example');
+  assert(
+    equalBytes(sessionA.chain.leaf.publicKey, sessionB.chain.leaf.publicKey),
+    'Server leaf certificate key must persist across sessions (it is the long-term identity)',
+  );
+  assert(
+    sessionA.keyExchange.serverPublicHex !== sessionB.keyExchange.serverPublicHex,
+    'Ephemeral key shares must NOT persist across sessions',
+  );
+  assert(
+    !equalBytes(sessionA.schedule.handshakeSecret, sessionB.schedule.handshakeSecret),
+    'Session secrets must NOT persist across sessions',
+  );
+
+  // --- The MITM exhibit must attack THIS session's real material ------------
+  const trace = await runFullHandshake('example.com');
+  const materials = trace.sessionMaterials;
+  const attacks = ['reuse-cert', 'own-key', 'relay'] as const;
+  for (const attack of attacks) {
+    const m = await runMitmAttempt(materials, attack);
+    assert(
+      m.sessionTranscriptHex === trace.certVerifyTranscriptHex,
+      `MITM (${attack}) must report the session's real CertificateVerify transcript, not a separate invention`,
+    );
+    assert(m.keyExchangeSucceeded, `MITM (${attack}): the client always completes ECDHE with the peer it saw`);
+    assert(m.attackBlocked, `MITM (${attack}) must not yield a readable session to the attacker`);
+  }
+
+  // Reuse the server's certificate: the chain is genuine and validates, but the
+  // attacker has no leaf private key, and the server's own signature cannot be
+  // moved onto the transcript the attacker's key share created.
+  const reuse = await runMitmAttempt(materials, 'reuse-cert');
+  assert(reuse.chainVerdict.valid, 'A replayed genuine chain must still validate — certificates are public');
+  assert(!reuse.certificateVerifyAccepted, 'An attacker without the leaf private key must fail CertificateVerify');
+  assert(reuse.transcriptsDiffer, 'Injecting its own key share must change the transcript the client hashes');
+  assert(!reuse.replayedSignatureAccepted, "The server's genuine signature must not satisfy the attacker's transcript");
+  assert(!reuse.clientAccepts, 'Client must reject the reuse-certificate attack');
+  assert(reuse.attackerHoldsSessionSecret, 'The attacker does complete ECDHE — key exchange alone proves nothing');
+
+  // Sign with its own key: the signature is perfectly valid under the key the
+  // attacker presented. What stops it is the trust anchor, not the signature.
+  const own = await runMitmAttempt(materials, 'own-key');
+  assert(
+    own.certificateVerifyAccepted,
+    'An attacker signing with its own leaf key produces a signature that DOES verify under that leaf',
+  );
+  assert(!own.chainVerdict.trustAnchorMatches, "An attacker-minted root must not match the client's trust anchor");
+  assert(!own.chainVerdict.valid, 'An attacker-minted chain must fail chain validation');
+  assert(!own.clientAccepts, 'Client must reject the sign-with-own-key attack');
+
+  // Relay unchanged: every check passes, because the client really is talking to
+  // the real server. The attacker gains nothing — it never injected a key share.
+  const relay = await runMitmAttempt(materials, 'relay');
+  assert(!relay.transcriptsDiffer, 'Relaying unchanged must reproduce the genuine transcript exactly');
+  assert(
+    relay.chainVerdict.valid && relay.certificateVerifyAccepted && relay.clientAccepts,
+    'A pure relay is indistinguishable from the real server, so the client accepts',
+  );
+  assert(!relay.attackerHoldsSessionSecret, 'A pure relay never obtains the session secret');
 
   console.log('auth gates: PASS');
 }

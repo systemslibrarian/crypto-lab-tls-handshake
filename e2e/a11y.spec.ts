@@ -6,11 +6,11 @@ import { expect, test, type Page } from '@playwright/test';
  *
  * The app is a single page rendered by main.ts (no tabs, no <details>). It has
  * an interactive simulator (Step/Back/Auto-play/New-session), a per-message
- * ladder, and a MITM "attack" button that injects a result region only after
- * it's clicked. So we drive the simulator to the LAST step (so every message
+ * ladder, and a MITM panel whose result region only exists after an attack is
+ * chosen. So we drive the simulator to the LAST step (so every message
  * row + its detail card, including the app-key/handshake-key states, is
- * rendered), and fire the MITM button so its injected verdicts/box are in the
- * DOM. Then we neutralize motion/opacity (the ladder dims un-reached rows via
+ * rendered), and run each attacker strategy so every colour state of the
+ * injected checks/box is scanned. Then we neutralize motion/opacity (the ladder dims un-reached rows via
  * opacity, and the shell fades in) so the contrast checker sees final states.
  *
  * Scans both themes with WCAG 2.0/2.1 A + AA; asserts zero violations.
@@ -38,9 +38,10 @@ async function revealAll(page: Page): Promise<void> {
   });
 }
 
-// Drive the simulator to the last step and trigger the MITM attack so all the
-// dynamically-injected regions (detail cards for every flight, MITM verdict
-// box) exist and are painted when axe runs.
+// Drive the simulator to the last step and run every MITM strategy so all the
+// dynamically-injected regions (detail cards for every flight, and the MITM
+// check list in each of its blocked/succeeded colour states) exist and are
+// painted when axe runs.
 async function driveDemo(page: Page): Promise<void> {
   // Step through the whole handshake so each message's detail card renders.
   const next = page.locator('#nextBtn');
@@ -48,9 +49,14 @@ async function driveDemo(page: Page): Promise<void> {
     if (await next.isDisabled().catch(() => false)) break;
     await next.click();
   }
-  // Fire the MITM attack to inject its blocked/verdicts region.
-  await page.locator('#mitmBtn').click();
-  await expect(page.locator('.mitm-box')).toBeVisible();
+  // Each strategy trips a different check, so between them they paint every
+  // mc-good / mc-neutral state the list can reach. ('relay' is the one the
+  // client accepts, and it is scanned last.)
+  for (const attack of ['reuse-cert', 'own-key', 'relay']) {
+    await page.locator(`.mitm-buttons [data-attack="${attack}"]`).click();
+    await expect(page.locator('.mitm-box')).toBeVisible();
+    await expect(page.locator('.mitm-checks li')).toHaveCount(5);
+  }
 }
 
 async function scan(page: Page): Promise<void> {
