@@ -72,7 +72,7 @@ gate the GitHub Pages deploy (`.github/workflows/deploy.yml`).
 
 ## Part of the Crypto-Lab Suite
 
-> One of 60+ live browser demos at
+> One of 170+ live browser demos at
 > [systemslibrarian.github.io/crypto-lab](https://systemslibrarian.github.io/crypto-lab/)
 > — spanning Atbash (600 BCE) through NIST FIPS 203/204/205 (2024).
 
