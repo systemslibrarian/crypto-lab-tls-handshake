@@ -109,16 +109,19 @@ function detailCard(s: HandshakeStep): string {
         .map((k) => `<div class="keyrow"><span class="kname">${esc(k.name)} (${k.bytes} B)</span><span class="kval">${esc(k.preview)}</span></div>`)
         .join('')}</div>`
     : '';
+  // The hash a signature or MAC covers necessarily ends just BEFORE the message
+  // carrying it — nothing can cover itself — so say which run it is.
   const bindNote = s.bindsTranscript
-    ? `<span class="tx-bind">↑ this exact hash is what gets ${s.id === 'certificate-verify' ? 'SIGNED' : 'MAC&#39;d'} here</span>`
+    ? `<span class="tx-bind">↑ this exact hash — over ${esc(s.transcriptCovers)}, the transcript ending just before
+        this message — is what gets ${s.id === 'certificate-verify' ? 'SIGNED' : 'MAC&#39;d'} here</span>`
     : '';
   const txChip = `
       <h4>Transcript so far
         <span class="term" tabindex="0" role="note" aria-label="Transcript hash: SHA-256 over every handshake message seen so far. Signatures and MACs are computed over this value, binding them to this exact conversation.">?</span>
       </h4>
       <div class="tx-chip ${s.bindsTranscript ? 'binding' : ''}">
-        <span class="tx-label">SHA-256(messages 1..${stepOrdinal(s)})</span>
-        <span class="tx-val" tabindex="0" role="region" aria-label="Transcript hash after this message">${esc(shortHexStr(s.transcriptHashHex))}</span>
+        <span class="tx-label">SHA-256(${esc(s.transcriptCovers)})</span>
+        <span class="tx-val" tabindex="0" role="region" aria-label="Transcript hash over ${esc(s.transcriptCovers)}">${esc(shortHexStr(s.transcriptHashHex))}</span>
       </div>
       ${bindNote}`;
   return `
@@ -132,10 +135,6 @@ function detailCard(s: HandshakeStep): string {
       <h4>Security properties so far</h4>
       <ul>${s.security.map((o) => `<li>${esc(o)}</li>`).join('')}</ul>
     </div>`;
-}
-
-function stepOrdinal(s: HandshakeStep): number {
-  return state.trace.steps.findIndex((x) => x.id === s.id) + 1;
 }
 
 function simulatorSection(t: HandshakeTrace): string {

@@ -173,6 +173,15 @@ export interface HandshakeStep {
    * change rather than a claim in prose.
    */
   transcriptHashHex: string;
+  /**
+   * The exact run of handshake messages `transcriptHashHex` is taken over, e.g.
+   * "ClientHello..Certificate". It is NOT always "everything up to and including
+   * this step": CertificateVerify signs the transcript that ends just *before*
+   * it, and Finished MACs the transcript that ends just before it. The UI labels
+   * the chip with this string, because labelling it with the step's own ordinal
+   * asserted a coverage the value does not have.
+   */
+  transcriptCovers: string;
   /** True on the steps whose security rests on the transcript hash above. */
   bindsTranscript?: boolean;
 }
@@ -333,8 +342,14 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
   // first with a placeholder app hash to get the handshake secrets, then again
   // with the real app-phase hash. Cheaper and clearer: derive handshake secrets
   // directly via deriveKeySchedule using thHello for both, then recompute.
-  const provisional = await deriveKeySchedule(serverShared, thHello, thHello);
-  const sHsBase = provisional.serverHandshakeTrafficSecret;
+  // Each side runs the schedule off ITS OWN ECDHE output. This is what makes the
+  // two Finished checks below real checks rather than restatements: an earlier
+  // version MAC'd with a secret and then verified with the very same variable,
+  // so serverFinishedValid/clientFinishedValid were true by construction and
+  // could not have gone false if X25519 agreement or the transcript had broken.
+  const serverProvisional = await deriveKeySchedule(serverShared, thHello, thHello);
+  const clientProvisional = await deriveKeySchedule(clientShared, thHello, thHello);
+  const sHsBase = serverProvisional.serverHandshakeTrafficSecret;
 
   // Server Finished MAC covers Hash(CH..CertificateVerify).
   const thForServerFinished = await sha256(
@@ -342,17 +357,28 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
   );
   const serverFinishedData = await finishedMac(sHsBase, thForServerFinished);
   const serverFinished = serializeFinished(serverFinishedData);
-  // Client verifies the server Finished with the server's handshake traffic secret.
-  const serverFinishedValid = await verifyFinished(sHsBase, thForServerFinished, serverFinishedData);
+  // The CLIENT verifies, using the server handshake traffic secret it derived
+  // itself from its own X25519 output.
+  const serverFinishedValid = await verifyFinished(
+    clientProvisional.serverHandshakeTrafficSecret,
+    thForServerFinished,
+    serverFinishedData,
+  );
 
   // Now the application-phase transcript hash: Hash(CH..server Finished).
   const thAfterServerFinished = await sha256(
     concatBytes(clientHello, serverHello, encryptedExtensions, certificate, certificateVerify, serverFinished),
   );
   const schedule = await deriveKeySchedule(serverShared, thHello, thAfterServerFinished);
+  const clientSchedule = await deriveKeySchedule(clientShared, thHello, thAfterServerFinished);
 
   // --- Flight 3: client Finished covers Hash(CH..server Finished) ---
-  const clientFinishedData = await finishedMac(schedule.clientHandshakeTrafficSecret, thAfterServerFinished);
+  // Client MACs with its own client handshake traffic secret; the SERVER checks
+  // it with the one the server derived.
+  const clientFinishedData = await finishedMac(
+    clientSchedule.clientHandshakeTrafficSecret,
+    thAfterServerFinished,
+  );
   const clientFinished = serializeFinished(clientFinishedData);
   const clientFinishedValid = await verifyFinished(
     schedule.clientHandshakeTrafficSecret,
@@ -373,15 +399,21 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
   const clientFinishedTh = await sha256(
     concatBytes(clientHello, serverHello, encryptedExtensions, certificate, certificateVerify, serverFinished, clientFinished),
   );
-  const thByStepId: Record<string, string> = {
-    'client-hello': toHex(await sha256(clientHello)),
-    'server-hello': toHex(thHello),
-    'encrypted-extensions': toHex(await sha256(concatBytes(clientHello, serverHello, encryptedExtensions))),
-    certificate: toHex(thForCertVerify),
-    'certificate-verify': toHex(thForCertVerify), // CV signs Hash(CH..Certificate); transcript unchanged until it is appended
-    'server-finished': toHex(thForServerFinished),
-    'client-finished': toHex(clientFinishedTh),
-    'application-data': toHex(clientFinishedTh),
+  const thByStepId: Record<string, { hex: string; covers: string }> = {
+    'client-hello': { hex: toHex(await sha256(clientHello)), covers: 'ClientHello' },
+    'server-hello': { hex: toHex(thHello), covers: 'ClientHello..ServerHello' },
+    'encrypted-extensions': {
+      hex: toHex(await sha256(concatBytes(clientHello, serverHello, encryptedExtensions))),
+      covers: 'ClientHello..EncryptedExtensions',
+    },
+    certificate: { hex: toHex(thForCertVerify), covers: 'ClientHello..Certificate' },
+    // CertificateVerify signs Hash(CH..Certificate) — the transcript that ends
+    // just BEFORE it. A signature cannot cover itself.
+    'certificate-verify': { hex: toHex(thForCertVerify), covers: 'ClientHello..Certificate' },
+    // Likewise the server Finished MACs the transcript ending at CertificateVerify.
+    'server-finished': { hex: toHex(thForServerFinished), covers: 'ClientHello..CertificateVerify' },
+    'client-finished': { hex: toHex(clientFinishedTh), covers: 'ClientHello..Finished (client)' },
+    'application-data': { hex: toHex(clientFinishedTh), covers: 'ClientHello..Finished (client)' },
   };
 
   // One fully decomposed derivation for the "show your work" HKDF view: the
@@ -407,7 +439,7 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
     agrees: sharedSecretAgrees,
   };
 
-  const stepsBase: Omit<HandshakeStep, 'transcriptHashHex'>[] = [
+  const stepsBase: Omit<HandshakeStep, 'transcriptHashHex' | 'transcriptCovers'>[] = [
     {
       id: 'client-hello',
       flight: 1,
@@ -549,7 +581,8 @@ export async function runFullHandshake(serverName = 'example.com'): Promise<Hand
 
   const steps: HandshakeStep[] = stepsBase.map((s) => ({
     ...s,
-    transcriptHashHex: thByStepId[s.id] ?? '',
+    transcriptHashHex: thByStepId[s.id]?.hex ?? '',
+    transcriptCovers: thByStepId[s.id]?.covers ?? '',
   }));
 
   const serverFlightBytes =

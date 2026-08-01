@@ -110,6 +110,14 @@ async function phaseKeySchedule(): Promise<void> {
   assert(fin.length === 32, 'Finished verify_data must be 32 bytes');
   assert(await verifyFinished(s1.serverHandshakeTrafficSecret, thA, fin), 'Finished must verify for its transcript');
   assert(!(await verifyFinished(s1.serverHandshakeTrafficSecret, thB, fin)), 'Finished must reject a different transcript');
+  // ...and reject when the two sides did not agree on the ECDHE secret. This is
+  // the property that makes runFullHandshake's serverFinishedValid /
+  // clientFinishedValid meaningful: the verifier derives its finished_key from
+  // its OWN X25519 output, so a disagreement has to surface here.
+  assert(
+    !(await verifyFinished(s3.serverHandshakeTrafficSecret, thA, fin)),
+    'Finished must reject a peer that derived from a different ECDHE secret',
+  );
 
   console.log('keyschedule gates: PASS');
 }
@@ -258,6 +266,31 @@ async function phaseHandshake(): Promise<void> {
   assert(trace.clientFinishedValid, 'Client Finished must verify');
   assert(trace.chainVerdict.valid, 'Certificate chain must validate');
   assert(trace.steps.length === 8, `Expected 8 handshake steps, got ${trace.steps.length}`);
+
+  // Every step's transcript chip must name the run of messages it is actually a
+  // hash of. The chip used to be labelled "SHA-256(messages 1..N)" with N the
+  // step's own ordinal, which was wrong wherever a signature or MAC covers the
+  // transcript ending just BEFORE its own message.
+  for (const s of trace.steps) {
+    assert(s.transcriptCovers.length > 0, `Step ${s.id} must say what its transcript hash covers`);
+  }
+  const covers = (id: string): string => trace.steps.find((s) => s.id === id)!.transcriptCovers;
+  const hashOf = (id: string): string => trace.steps.find((s) => s.id === id)!.transcriptHashHex;
+  assert(covers('certificate-verify') === 'ClientHello..Certificate', 'CertificateVerify signs the transcript ending at Certificate');
+  assert(covers('server-finished') === 'ClientHello..CertificateVerify', 'Server Finished MACs the transcript ending at CertificateVerify');
+  // Tie the label to the cryptography, not just to a string: the hash the
+  // CertificateVerify step displays must be the one the real signature verifies
+  // over. If the chip ever showed a different transcript, this fails.
+  assert(hashOf('certificate-verify') === trace.certVerifyTranscriptHex, 'CertificateVerify chip must show the signed transcript');
+  assert(
+    verifyCertificateVerify(
+      fromHex(hashOf('certificate-verify')),
+      trace.sessionMaterials.certVerifySignature,
+      trace.chain.leaf.publicKey,
+    ),
+    'The transcript hash the CertificateVerify step displays must be the one its signature actually verifies over',
+  );
+  assert(hashOf('server-finished') !== hashOf('certificate-verify'), 'Appending CertificateVerify must move the transcript on');
 
   // The trace must move through all three flights in order.
   const flights = trace.steps.map((s) => s.flight);
