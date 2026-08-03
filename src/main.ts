@@ -359,7 +359,7 @@ function authSection(t: HandshakeTrace): string {
     </div>
     <p class="lead" style="margin-top:0.7rem">Each check is reported independently, so a failure points at the exact
       broken link. The leaf key above is the server's <strong>long-term</strong> identity: press <em>New session</em> and
-      it stays put while every ephemeral key and derived secret changes. Now watch what happens when an attacker sits in
+      it stays put while every ephemeral key and every ECDHE-derived secret changes. Now watch what happens when an attacker sits in
       the middle:</p>
     ${mitmHtml}
   </section>`;
@@ -378,7 +378,7 @@ function scheduleSection(t: HandshakeTrace): string {
       HKDF to derive a tree of independent secrets — one per direction, per phase — so compromising one never exposes
       the others. Every value below is the real HKDF output for this session.</p>
     <div class="schedule">
-      ${row('Extract', 'Early Secret', k.earlySecret)}
+      ${row('Extract', 'Early Secret  (constant — no PSK)', k.earlySecret)}
       ${row('Extract', 'Handshake Secret  (← ECDHE)', k.handshakeSecret)}
       ${row('Derive', 'client handshake traffic', k.clientHandshakeTrafficSecret, true)}
       ${row('Derive', 'server handshake traffic', k.serverHandshakeTrafficSecret, true)}
@@ -391,7 +391,10 @@ function scheduleSection(t: HandshakeTrace): string {
     <p class="lead" style="margin-top:0.8rem"><strong>Forward secrecy:</strong> the X25519 private keys are ephemeral —
       generated for this session and discarded the moment it ends. The server's <strong>long-term</strong> key is the
       Ed25519 leaf key in section 4, which persists across sessions here (press <em>New session</em> and watch it stay
-      the same while every secret above changes). An attacker who later steals that key still cannot recover these
+      the same while every secret below the Early Secret changes — the Early Secret is
+      <code>HKDF-Extract(0, 0)</code> when there is no PSK, so it is a protocol constant rather than session
+      material, and it is the Handshake Secret that first mixes in this session's ECDHE output). An attacker who
+      later steals that key still cannot recover these
       session keys: it is a <em>signing</em> key, and the only secret this schedule extracts from is the ephemeral
       X25519 output. Contrast with old RSA key-transport (TLS ≤1.2), where the long-term key <em>was</em> the decryption
       key and recovered every past session it ever protected.</p>
