@@ -78,7 +78,7 @@ function overviewSection(): string {
       <div class="pillar"><strong>Integrity</strong><span>Tampering is detected and rejected. Provided by the AEAD tag and Finished MACs.</span></div>
       <div class="pillar"><strong>Authentication</strong><span>You're talking to the real server, not a MITM. Provided by certificates + signatures.</span></div>
     </div>
-    <div class="flow-chips" aria-label="High level message flow">
+    <div class="flow-chips" role="group" aria-label="High level message flow">
       <span>ClientHello</span><span class="arrow">→</span>
       <span>ServerHello</span><span class="arrow">→</span>
       <span>Certificate</span><span class="arrow">→</span>
@@ -316,7 +316,7 @@ function mitmPanel(t: HandshakeTrace): string {
         ${mitmCheck('client accepts the handshake', m.clientAccepts, m.clientAccepts ? (m.attackerHoldsSessionSecret ? 'bad' : 'neutral') : 'good')}
         ${mitmCheck('attacker ends up holding the session secret', m.attackerHoldsSessionSecret, m.attackerHoldsSessionSecret ? (m.clientAccepts ? 'bad' : 'neutral') : 'good')}
       </ul>
-      <div class="tx-compare" aria-label="Transcript hashes compared">
+      <div class="tx-compare" role="group" aria-label="Transcript hashes compared">
         <div class="tx-cmp-title">The transcript <code>CertificateVerify</code> has to be signed over</div>
         <div class="tx-cmp-row"><span class="tx-cmp-tag good-tag">genuine session (§2, after Certificate)</span>
           <span class="tx-cmp-hash" tabindex="0" role="region" aria-label="Genuine session transcript hash">${esc(shortHexStr(m.sessionTranscriptHex))}</span></div>

@@ -1,105 +1,34 @@
-import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Page } from '@playwright/test';
+import { test } from '@playwright/test';
+import { boot, driveAllStates, NARROW } from './gate';
 
 /**
- * Strict WCAG regression gate for the TLS 1.3 Handshake lab.
+ * WCAG A/AA regression gate.
  *
- * The app is a single page rendered by main.ts (no tabs, no <details>). It has
- * an interactive simulator (Step/Back/Auto-play/New-session), a per-message
- * ladder, and a MITM panel whose result region only exists after an attack is
- * chosen. So we drive the simulator to the LAST step (so every message
- * row + its detail card, including the app-key/handshake-key states, is
- * rendered), and run each attacker strategy so every colour state of the
- * injected checks/box is scanned. Then we neutralize motion/opacity (the ladder dims un-reached rows via
- * opacity, and the shell fades in) so the contrast checker sees final states.
+ * The lab is driven along the handshake it teaches: the skip link focused, all
+ * eight messages stepped through so every detail card, every lock badge and
+ * every mix of unreached / seen / current ladder rows is painted, a step
+ * reached again by Back and by a direct ladder jump, auto-play toggled both
+ * ways, the HKDF derivation `<details>` opened through its summary, all three
+ * fault choices injected and their real verifier verdicts scanned, all three
+ * MITM moves run — including `relay`, the one the client accepts — and a new
+ * session started. Every one of those states is scanned, in both themes, at
+ * desktop and phone width.
  *
- * Scans both themes with WCAG 2.0/2.1 A + AA; asserts zero violations.
+ * See `gate.ts` for why nothing is injected into the page, why each scan
+ * asserts its content first, and why `violations` is not the whole oracle.
  */
 
-const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
+for (const theme of ['dark', 'light'] as const) {
+  test(`no WCAG A/AA violations in ${theme} theme`, async ({ page }) => {
+    test.setTimeout(900_000);
+    await boot(page, theme);
+    await driveAllStates(page, theme);
+  });
 
-// Neutralize animation/transition/opacity so mid-flight states (shell fade-in,
-// dimmed ladder rows) can't hide text from the contrast checker.
-async function killMotion(page: Page): Promise<void> {
-  await page.addStyleTag({
-    content: `*,*::before,*::after{
-      animation-duration:0s!important;animation-delay:0s!important;
-      transition-duration:0s!important;transition-delay:0s!important;
-      opacity:1!important;scroll-behavior:auto!important;
-    }`,
+  test(`no WCAG A/AA violations in ${theme} theme at 380px`, async ({ page }) => {
+    test.setTimeout(900_000);
+    await page.setViewportSize(NARROW);
+    await boot(page, theme);
+    await driveAllStates(page, `${theme} @380px`);
   });
 }
-
-// Generic collapsible reveal for robustness (this lab has none today).
-async function revealAll(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    for (const d of document.querySelectorAll('details')) (d as HTMLDetailsElement).open = true;
-    for (const el of document.querySelectorAll<HTMLElement>('[hidden]')) el.removeAttribute('hidden');
-  });
-}
-
-// Drive the simulator to the last step and run every MITM strategy so all the
-// dynamically-injected regions (detail cards for every flight, and the MITM
-// check list in each of its blocked/succeeded colour states) exist and are
-// painted when axe runs.
-async function driveDemo(page: Page): Promise<void> {
-  // Step through the whole handshake so each message's detail card renders.
-  const next = page.locator('#nextBtn');
-  for (let i = 0; i < 12; i++) {
-    if (await next.isDisabled().catch(() => false)) break;
-    await next.click();
-  }
-  // Inject the ECDHE fault. Its verdict row is the one panel that carries a
-  // passing pill and failing pills at the same time (authentication still
-  // holds; both Finished MACs do not), so scanning it covers both pill colours
-  // inside the dashed "faulted" background in a single pass. Re-rendering here
-  // clears any MITM result, so this runs before the attack loop below.
-  await page.locator('.fault-buttons [data-fault="ecdhe"]').click();
-  await expect(page.locator('.fault-panel.faulted')).toBeVisible();
-  await expect(page.locator('.fault-panel .pill')).toHaveCount(4);
-
-  // Each strategy trips a different check, so between them they paint every
-  // mc-good / mc-neutral state the list can reach. ('relay' is the one the
-  // client accepts, and it is scanned last.)
-  for (const attack of ['reuse-cert', 'own-key', 'relay']) {
-    await page.locator(`.mitm-buttons [data-attack="${attack}"]`).click();
-    await expect(page.locator('.mitm-box')).toBeVisible();
-    await expect(page.locator('.mitm-checks li')).toHaveCount(5);
-  }
-}
-
-async function scan(page: Page): Promise<void> {
-  const results = await new AxeBuilder({ page }).withTags(TAGS).analyze();
-  const summary = results.violations.map((v) => ({
-    id: v.id,
-    impact: v.impact,
-    help: v.help,
-    nodes: v.nodes.map((n) => n.target.join(' ')).slice(0, 5),
-  }));
-  expect(summary).toEqual([]);
-}
-
-test.beforeEach(async ({ page }) => {
-  await page.goto('.');
-  // App is rendered by main.ts after an async handshake; wait for the shell.
-  await expect(page.locator('#cl-theme-toggle')).toBeVisible();
-  await expect(page.locator('.shell')).toBeVisible();
-  await expect(page.locator('#nextBtn')).toBeVisible();
-});
-
-test('no WCAG A/AA violations in dark theme (simulator driven)', async ({ page }) => {
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-  await driveDemo(page);
-  await killMotion(page);
-  await revealAll(page);
-  await scan(page);
-});
-
-test('no WCAG A/AA violations in light theme (simulator driven)', async ({ page }) => {
-  await page.locator('#cl-theme-toggle').click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  await driveDemo(page);
-  await killMotion(page);
-  await revealAll(page);
-  await scan(page);
-});

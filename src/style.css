@@ -3,8 +3,14 @@
 :root {
   color-scheme: dark;
 
-  /* Brand accent — tints the shared header and this lab's highlights. */
-  --accent: #5b9cf6;
+  /* Brand accent — tints the shared header and this lab's highlights, and is
+     also the ink for every accent-coloured label on the page. #5b9cf6 met that
+     second job on the opaque panels but not on the hero: the "WHY IT MATTERS"
+     label sits on a 6%-accent aside over the page's blue radial wash, which
+     composites to rgb(28,58,76), and #5b9cf6 measures 4.27:1 there. #6ea6f7 is
+     the same hue lifted until it clears — 4.81:1 on that surface, and better on
+     every darker one. */
+  --accent: #6ea6f7;
 
   --bg0: #0a0f18;
   --bg1: #111a2b;
@@ -29,7 +35,11 @@
 :root[data-theme='light'] {
   color-scheme: light;
 
-  --accent: #1d63d8;
+  /* Same job, same failure, opposite direction. #1d63d8 measured 3.86:1 on the
+     hero aside (rgb(190,221,239)), 4.21:1 on the hero subtitle's backdrop and
+     4.37:1 for the footer links, which sit on the page gradient rather than on a
+     panel. #1a53bd clears all three: 4.90:1, 5.35:1, 5.54:1. */
+  --accent: #1a53bd;
 
   --bg0: #eef3fa;
   --bg1: #dde6f3;
@@ -44,8 +54,12 @@
   --server: #be1a6e;
   --handshake: #8a5a00;
   --appdata: #0b7a4d;
-  --ok: #0b7a4d;
-  --bad: #c02434;
+  /* Pills tint their own background with 12-18% of these hues, so the ink is
+     never on white — it is on its own wash. #0b7a4d measured 4.14:1 on the
+     green pill and #c02434 measured 4.43:1 on the red one. Darkened until both
+     clear on their own fill: 5.07:1 and 4.96:1. */
+  --ok: #0a6b43;
+  --bad: #b41f2e;
   --warn: #8a5a00;
 }
 
@@ -99,7 +113,11 @@ a {
 .cl-hero{display:flex;align-items:flex-start;justify-content:space-between;gap:clamp(1rem,4vw,3rem);flex-wrap:wrap;margin:clamp(1rem,3vw,2rem) 0 1.5rem;}
 .cl-hero-main{flex:1 1 22rem;min-width:min(100%,20rem);}
 .cl-hero-title{margin:0;font-size:clamp(1.6rem,3.8vw,2.7rem);font-weight:700;line-height:1.1;letter-spacing:.01em;color:var(--ink);}
-.cl-hero-sub{margin:.4rem 0 0;font-size:clamp(.9rem,1.6vw,1.05rem);letter-spacing:.01em;opacity:.85;color:var(--accent);font-family:'IBM Plex Mono',monospace;}
+/* No `opacity: .85` here. The subtitle is already --accent on the page
+   background — a second de-emphasis on top of the first, and over the hero's
+   radial wash it measured 3.92:1 in dark and 3.34:1 in light. Unfaded, with the
+   corrected --accent: 5.41:1 and 5.35:1. */
+.cl-hero-sub{margin:.4rem 0 0;font-size:clamp(.9rem,1.6vw,1.05rem);letter-spacing:.01em;color:var(--accent);font-family:'IBM Plex Mono',monospace;}
 .cl-hero-desc{margin:.55rem 0 0;font-size:1rem;line-height:1.5;color:var(--muted);max-width:60ch;}
 .cl-hero-why{flex:0 1 min(40%,26rem);min-width:min(100%,15rem);border:1px solid var(--line);border-radius:10px;padding:.85rem 1.05rem;background:color-mix(in oklab,var(--accent) 6%,transparent);}
 .cl-hero-why-label{display:block;font-size:.68rem;font-weight:700;letter-spacing:.14em;color:var(--accent);}
@@ -285,36 +303,48 @@ a {
   color: var(--server);
 }
 
+/* Three states — not yet reached, seen, current — carried by surface and border
+   style, NOT by opacity.
+   This row used to be `opacity: .45` until you stepped past it, which faded
+   every label, byte count, lock badge and wire arrow on it: 2.29:1 for the
+   message names, 2.46:1 for the byte counts and 2.05-2.07:1 for the same things
+   in light theme, against a 4.5:1 requirement — on an ENABLED button a reader
+   can click to jump there, so WCAG's inactive-component exemption does not
+   apply. Fading is also the one cue that costs contrast; a missing fill and a
+   dashed border cost none, and the row already announces its own position
+   through `aria-current` and its label. */
 .msg {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 0.3rem;
-  border: 1px solid var(--line);
+  border: 1px dashed var(--line);
   border-radius: 10px;
   padding: 0.45rem 0.6rem;
-  background: var(--panel-solid);
+  background: transparent;
   cursor: pointer;
-  opacity: 0.45;
-  transition: opacity 0.18s, border-color 0.18s, transform 0.05s;
+  transition: background 0.18s, border-color 0.18s, transform 0.05s;
   text-align: left;
   font: inherit;
   color: inherit;
   width: 100%;
 }
 
-.msg:hover {
-  opacity: 0.8;
-}
-
 .msg.seen {
-  opacity: 1;
+  background: var(--panel-solid);
+  border-style: solid;
 }
 
 .msg.current {
-  opacity: 1;
+  background: var(--panel-solid);
+  border-style: solid;
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent) inset, 0 6px 18px rgba(91, 156, 246, 0.18);
+}
+
+/* After .seen/.current so hovering either of them still gives feedback. */
+.msg:hover {
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-solid));
 }
 
 .msg:focus-visible {
@@ -1196,11 +1226,15 @@ td.no {
 .lane-heads .s {
   border-radius: 6px;
   padding: 0.05rem 0.35rem;
-  transition: background 0.2s;
+  transition: box-shadow 0.2s;
 }
 
+/* A ring, not a wash. The 30%-accent background this used to paint sat directly
+   under the --client and --server inks and dropped them to 3.7-3.9:1 in both
+   themes for the 500ms the flash lasts. A ring marks the receiving lane just as
+   loudly and leaves the text on the surface it was measured against. */
 .lane-heads .flash {
-  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: 0 0 0 2px var(--accent);
 }
 
 /* ---- Animations / responsive -------------------------------------------- */
