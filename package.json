@@ -18,11 +18,11 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.62.1",
-    "tsx": "^4.23.12",
+    "tsx": "^4.23.13",
     "typescript": "~7.0.2",
     "vite": "^8.2.2"
   },
   "dependencies": {
-    "@noble/curves": "^2.3.0"
+    "@noble/curves": "^2.4.0"
   }
 }
