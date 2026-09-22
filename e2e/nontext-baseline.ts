@@ -18,10 +18,15 @@ export const NONTEXT_BASELINE: Record<
   { ratio: number; required: number; unverified: boolean }
 > = {
   "control-boundary|a.cl-btn": { ratio: 1.35, required: 3.0, unverified: false },
+  "control-boundary|button#attack-own-key.btn": { ratio: 1.29, required: 3.0, unverified: false },
+  "control-boundary|button#attack-relay.btn": { ratio: 1.29, required: 3.0, unverified: false },
+  "control-boundary|button#attack-reuse-cert.btn": { ratio: 1.29, required: 3.0, unverified: false },
   "control-boundary|button#autoBtn.btn": { ratio: 1.34, required: 3.0, unverified: false },
+  "control-boundary|button#fault-ecdhe.btn": { ratio: 1.29, required: 3.0, unverified: false },
+  "control-boundary|button#fault-none.btn": { ratio: 1.29, required: 3.0, unverified: false },
+  "control-boundary|button#fault-transcript.btn": { ratio: 1.29, required: 3.0, unverified: false },
   "control-boundary|button#prevBtn.btn": { ratio: 1.34, required: 3.0, unverified: false },
   "control-boundary|button#resetBtn.btn": { ratio: 1.34, required: 3.0, unverified: false },
-  "control-boundary|button.btn": { ratio: 1.29, required: 3.0, unverified: false },
   "control-boundary|button.msg.to-client": { ratio: 1.35, required: 3.0, unverified: false },
   "control-boundary|button.msg.to-client.seen": { ratio: 1.34, required: 3.0, unverified: false },
   "control-boundary|button.msg.to-server": { ratio: 1.35, required: 3.0, unverified: false },
