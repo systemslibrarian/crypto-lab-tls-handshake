@@ -174,7 +174,7 @@ function integrityPanel(t: HandshakeTrace): string {
       <div class="fault-buttons" role="group" aria-label="Inject a fault into the handshake">
         ${FAULT_CHOICES.map(
           (f) =>
-            `<button class="btn ${t.fault === f.id ? 'primary' : ''}" data-fault="${f.id}"
+            `<button id="fault-${f.id}" class="btn ${t.fault === f.id ? 'primary' : ''}" data-fault="${f.id}"
                aria-pressed="${t.fault === f.id}">${esc(f.label)}</button>`,
         ).join('')}
       </div>
@@ -292,7 +292,7 @@ function mitmPanel(t: HandshakeTrace): string {
       <div class="mitm-buttons" role="group" aria-label="Choose the attacker's move">
         ${MITM_ATTACKS.map(
           (a) =>
-            `<button class="btn ${m?.attack === a.id ? 'primary' : ''}" data-attack="${a.id}"
+            `<button id="attack-${a.id}" class="btn ${m?.attack === a.id ? 'primary' : ''}" data-attack="${a.id}"
                aria-pressed="${m?.attack === a.id}">${esc(a.label)}</button>`,
         ).join('')}
       </div>
