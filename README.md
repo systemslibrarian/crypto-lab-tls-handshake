@@ -5,7 +5,7 @@
 
 ## What It Is
 
-A browser demo of a complete **TLS 1.3** (RFC 8446) handshake, run entirely in the
+A browser demo of a complete **TLS 1.3** (RFC 9846) handshake, run entirely in the
 page with no server. It uses genuine cryptographic primitives — **X25519** ephemeral
 key exchange, **Ed25519** certificate-chain and `CertificateVerify` signatures, the
 **HKDF** key schedule (`HKDF-Extract` / `HKDF-Expand-Label` / `Derive-Secret`), HMAC
@@ -22,7 +22,7 @@ check a real client performs. The page states those boundaries itself, in a Scop
 - **Teaching how a real handshake fits together** — students who learned Diffie–Hellman, signatures, and AEAD in isolation can see them combine into one protocol.
 - **Showing why authentication, not key exchange, stops a MITM** — the attack panel runs three different attacker strategies against the *current session's* real chain and real transcript, and shows which check each one trips: reusing the server's certificate fails the signature, signing with the attacker's own key fails the trust anchor, and relaying unchanged passes every check while gaining the attacker nothing.
 - **Explaining forward secrecy concretely** — the server's Ed25519 certificate key persists across sessions while the X25519 keys are generated per session and discarded, so you can press *New session* and watch the long-term key stay put while every derived secret changes.
-- **Walking the TLS 1.3 key schedule** — every secret in the RFC 8446 §7.1 tree is shown as the real HKDF output for the current session.
+- **Walking the TLS 1.3 key schedule** — every secret in the RFC 9846 §7.1 tree is shown as the real HKDF output for the current session.
 - **Do NOT use it as a TLS library.** It is an educational tool; JavaScript here is not constant-time and the chain validation is intentionally minimal. For production, use a vetted TLS implementation.
 
 ## Live Demo

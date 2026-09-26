@@ -23,7 +23,7 @@ import {
   utf8,
 } from './primitives';
 
-/** RFC 8446 §4.4.3 CertificateVerify context for a server signature. */
+/** RFC 9846 §4.5.2 CertificateVerify context for a server signature. */
 const CERT_VERIFY_CONTEXT = 'TLS 1.3, server CertificateVerify';
 /** 64 octets of 0x20 (space) that prefix the signed content. */
 const CERT_VERIFY_PADDING = new Uint8Array(64).fill(0x20);
@@ -143,7 +143,7 @@ export function verifyChain(chain: CertChain, trustedRootPublicKey: Uint8Array):
   };
 }
 
-/** The exact content the server signs in CertificateVerify (RFC 8446 §4.4.3). */
+/** The exact content the server signs in CertificateVerify (RFC 9846 §4.5.2). */
 export function certificateVerifyContent(transcriptHash: Uint8Array): Uint8Array {
   return concatBytes(CERT_VERIFY_PADDING, utf8(CERT_VERIFY_CONTEXT), new Uint8Array([0x00]), transcriptHash);
 }

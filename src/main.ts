@@ -71,7 +71,7 @@ function overviewSection(): string {
     <h2><span class="section-num">1</span> What TLS 1.3 Gives You</h2>
     <p class="lead">TLS is the protocol behind every <code>https://</code> connection. The handshake's job is to turn an
       open, untrusted network into a channel with three properties — using cryptographic primitives you may have only
-      met in isolation. TLS 1.3 (RFC 8446) is a major cleanup of TLS 1.2: fewer round trips, forward secrecy by
+      met in isolation. TLS 1.3 (RFC 9846) is a major cleanup of TLS 1.2: fewer round trips, forward secrecy by
       default, and all the legacy/insecure options removed.</p>
     <div class="pillars">
       <div class="pillar"><strong>Confidentiality</strong><span>Eavesdroppers see only ciphertext. Provided by AEAD (AES-128-GCM here).</span></div>
@@ -374,7 +374,7 @@ function scheduleSection(t: HandshakeTrace): string {
   return `
   <section class="panel">
     <h2><span class="section-num">5</span> Key Derivation &amp; Forward Secrecy</h2>
-    <p class="lead">One ECDHE secret is never used directly. The TLS 1.3 key schedule (RFC 8446 §7.1) runs it through
+    <p class="lead">One ECDHE secret is never used directly. The TLS 1.3 key schedule (RFC 9846 §7.1) runs it through
       HKDF to derive a tree of independent secrets — one per direction, per phase — so compromising one never exposes
       the others. Every value below is the real HKDF output for this session.</p>
     <div class="schedule">
@@ -382,7 +382,7 @@ function scheduleSection(t: HandshakeTrace): string {
       ${row('Extract', 'Handshake Secret  (← ECDHE)', k.handshakeSecret)}
       ${row('Derive', 'client handshake traffic', k.clientHandshakeTrafficSecret, true)}
       ${row('Derive', 'server handshake traffic', k.serverHandshakeTrafficSecret, true)}
-      ${row('Extract', 'Master Secret', k.masterSecret)}
+      ${row('Extract', 'Main Secret', k.masterSecret)}
       ${row('Derive', 'client application traffic', k.clientApplicationTrafficSecret, true)}
       ${row('Derive', 'server application traffic', k.serverApplicationTrafficSecret, true)}
       ${row('Derive', 'exporter master', k.exporterMasterSecret, true)}
@@ -504,9 +504,9 @@ const SCOPE: { heading: string; bullets: string[] }[] = [
     heading: 'What this models faithfully',
     bullets: [
       'X25519 (EC)DHE key agreement and Ed25519 signatures — real @noble/curves implementations, verified for real.',
-      'The RFC 8446 §7.1 key schedule: HKDF-Extract, HKDF-Expand-Label, Derive-Secret. Checked against the RFC 8448 test vectors in the build gates.',
+      'The RFC 9846 §7.1 key schedule: HKDF-Extract, HKDF-Expand-Label, Derive-Secret. Checked against the RFC 8448 test vectors in the build gates.',
       'Transcript hashes taken as SHA-256 over the actual concatenated handshake-message bytes, and used as the real context input to the schedule.',
-      'The RFC 8446 §4.4.3 CertificateVerify content: 64 octets of 0x20, the context string, 0x00, then the transcript hash.',
+      'The RFC 9846 §4.5.2 CertificateVerify content: 64 octets of 0x20, the context string, 0x00, then the transcript hash.',
       'HMAC Finished verify_data over the running transcript, and AES-128-GCM record protection with the write_iv ⊕ sequence-number nonce and the record header as AAD.',
       'TLS handshake-message framing (type ‖ 3-byte length) and the real ClientHello / ServerHello body and extension encoding.',
     ],
@@ -588,7 +588,7 @@ function render(): void {
       <header class="cl-hero">
         <div class="cl-hero-main">
           <h1 class="cl-hero-title">TLS 1.3 Handshake</h1>
-          <p class="cl-hero-sub">TLS 1.3 · RFC 8446</p>
+          <p class="cl-hero-sub">TLS 1.3 · RFC 9846</p>
           <p class="cl-hero-desc">Step through a real 1-RTT handshake and watch ephemeral X25519 key exchange, Ed25519
             certificate authentication, the HKDF key schedule, and AES-128-GCM record protection combine live in your
             browser — with an MITM attempt you can run yourself.</p>

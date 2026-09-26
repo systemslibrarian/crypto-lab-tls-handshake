@@ -1,5 +1,5 @@
 /**
- * The TLS 1.3 key schedule (RFC 8446 §7.1) — the heart of how one X25519 shared
+ * The TLS 1.3 key schedule (RFC 9846 §7.1) — the heart of how one X25519 shared
  * secret becomes the many independent keys a connection needs.
  *
  *               0
@@ -13,7 +13,7 @@
  *               |  +--> Derive-Secret(., "s hs traffic", CH..SH)
  *          Derive-Secret(., "derived", "")
  *               |
- *      0 ->  HKDF-Extract = Master Secret
+ *      0 ->  HKDF-Extract = Main Secret
  *                  +--> Derive-Secret(., "c ap traffic", CH..server Finished)
  *                  +--> Derive-Secret(., "s ap traffic", CH..server Finished)
  *
@@ -67,7 +67,7 @@ export async function deriveKeySchedule(
   transcriptToServerFinishedHash: Uint8Array,
 ): Promise<KeySchedule> {
   // Early Secret = HKDF-Extract(0, PSK). With no PSK, both the salt and the PSK
-  // are Hash.length zero bytes (RFC 8446 §7.1), giving the well-known constant
+  // are Hash.length zero bytes (RFC 9846 §7.1), giving the well-known constant
   // 33ad0a1c…f170f92a verified in scripts/phase-checks.ts.
   const earlySecret = await hkdfExtract(ZEROS, ZEROS);
 
@@ -87,7 +87,7 @@ export async function deriveKeySchedule(
     transcriptHelloHash,
   );
 
-  // Master Secret = HKDF-Extract(Derive-Secret(handshake, "derived", ""), 0).
+  // Main Secret = HKDF-Extract(Derive-Secret(handshake, "derived", ""), 0).
   const derivedForMaster = await hkdfExpandLabel(handshakeSecret, 'derived', emptyHash, HASH_SIZE);
   const masterSecret = await hkdfExtract(derivedForMaster, ZEROS);
 
@@ -121,7 +121,7 @@ export async function deriveKeySchedule(
 
 /**
  * Derive the record-protection key and IV from a traffic secret
- * (RFC 8446 §7.3): "key" and "iv" HKDF-Expand-Labels with empty context.
+ * (RFC 9846 §7.3): "key" and "iv" HKDF-Expand-Labels with empty context.
  */
 export async function deriveTrafficKeys(trafficSecret: Uint8Array): Promise<TrafficKeys> {
   const key = await hkdfExpandLabel(trafficSecret, 'key', EMPTY, AES128_KEY_BYTES);
@@ -130,7 +130,7 @@ export async function deriveTrafficKeys(trafficSecret: Uint8Array): Promise<Traf
 }
 
 /**
- * Finished message verify_data (RFC 8446 §4.4.4):
+ * Finished message verify_data (RFC 9846 §4.5.3):
  *   finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
  *   verify_data  = HMAC(finished_key, Transcript-Hash(handshake context))
  * The BaseKey is the *handshake* traffic secret of whichever side is sending.

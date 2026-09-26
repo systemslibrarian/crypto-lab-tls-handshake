@@ -150,10 +150,10 @@ async function phaseAuth(): Promise<void> {
   // A genuine signature over a DIFFERENT transcript must not transfer.
   assert(!verifyCertificateVerify(fromHex('dd'.repeat(32)), sig, chain.leaf.publicKey), 'CertificateVerify must bind the transcript');
 
-  // The signed content matches RFC 8446 §4.4.3 framing (64x 0x20 ‖ ctx ‖ 0x00 ‖ hash).
+  // The signed content matches RFC 9846 §4.5.2 framing (64x 0x20 ‖ ctx ‖ 0x00 ‖ hash).
   const content = certificateVerifyContent(th);
   const prefix = concatBytes(new Uint8Array(64).fill(0x20), utf8('TLS 1.3, server CertificateVerify'), new Uint8Array([0]));
-  assert(equalBytes(content.subarray(0, prefix.length), prefix), 'CertificateVerify content prefix must match RFC 8446');
+  assert(equalBytes(content.subarray(0, prefix.length), prefix), 'CertificateVerify content prefix must match RFC 9846');
   assert(equalBytes(content.subarray(prefix.length), th), 'CertificateVerify must end with the transcript hash');
 
   // Raw Ed25519 sanity (round-trip + tamper).

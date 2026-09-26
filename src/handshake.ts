@@ -2,7 +2,7 @@
  * Orchestrates a complete, real TLS 1.3 (EC)DHE handshake between an in-browser
  * client and server, and records a step-by-step trace the UI walks through.
  *
- * The full 1-RTT flight sequence (RFC 8446 §2):
+ * The full 1-RTT flight sequence (RFC 9846 §2):
  *
  *   Client ── ClientHello ─────────────────────────────────────────▶ Server
  *   Client ◀── ServerHello, {EncryptedExtensions}, {Certificate},
@@ -11,7 +11,7 @@
  *
  * Messages in {braces} are encrypted under handshake traffic keys; [brackets]
  * under application traffic keys. Everything below is computed for real: X25519
- * agreement, the RFC 8446 key schedule, Ed25519 CertificateVerify, HMAC Finished
+ * agreement, the RFC 9846 key schedule, Ed25519 CertificateVerify, HMAC Finished
  * MACs, and AES-128-GCM record protection.
  */
 import {
@@ -621,11 +621,11 @@ export async function runFullHandshake(
       title: 'Finished (client)',
       encrypted: 'handshake',
       cryptoOps: [
-        'Client verifies the server Finished, then derives the Master Secret and app traffic secrets',
+        'Client verifies the server Finished, then derives the Main Secret and app traffic secrets',
         'verify_data = HMAC(client finished_key, Hash(ClientHello..server Finished))',
       ],
       derived: [
-        keyView('master secret', schedule.masterSecret),
+        keyView('main secret', schedule.masterSecret),
         keyView('client application traffic secret', schedule.clientApplicationTrafficSecret),
         keyView('server application traffic secret', schedule.serverApplicationTrafficSecret),
         keyView('client Finished verify_data', clientFinishedData),

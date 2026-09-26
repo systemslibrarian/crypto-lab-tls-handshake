@@ -4,7 +4,7 @@
  * Everything here is genuine: X25519 ECDHE and Ed25519 signatures come from
  * @noble/curves; SHA-256, HMAC, HKDF, and AES-128-GCM come from WebCrypto
  * (SubtleCrypto). Nothing is faked or stubbed. The HKDF here is the exact
- * RFC 5869 / RFC 8446 construction (HKDF-Expand-Label included) and is checked
+ * RFC 5869 / RFC 9846 construction (HKDF-Expand-Label included) and is checked
  * against the RFC 8448 test vector in scripts/phase-checks.ts.
  *
  * The teaching subject of this demo is the *handshake key schedule and message
@@ -19,7 +19,7 @@ export const ED25519_SIG_BYTES = 64;
 
 export const HASH_SIZE = 32; // SHA-256
 export const AES128_KEY_BYTES = 16;
-export const AEAD_IV_BYTES = 12; // TLS 1.3 record nonce length (RFC 8446 5.3)
+export const AEAD_IV_BYTES = 12; // TLS 1.3 record nonce length (RFC 9846 5.3)
 
 const HASH_ALGO = 'SHA-256';
 const HMAC_ALGO = 'HMAC';
@@ -146,7 +146,7 @@ export function ed25519Verify(signature: Uint8Array, message: Uint8Array, public
 }
 
 // ---------------------------------------------------------------------------
-// HKDF (RFC 5869) + TLS 1.3 HKDF-Expand-Label / Derive-Secret (RFC 8446 7.1).
+// HKDF (RFC 5869) + TLS 1.3 HKDF-Expand-Label / Derive-Secret (RFC 9846 7.1).
 // ---------------------------------------------------------------------------
 
 export async function hkdfExtract(salt: Uint8Array, ikm: Uint8Array): Promise<Uint8Array> {
@@ -178,7 +178,7 @@ async function hkdfExpand(prk: Uint8Array, info: Uint8Array, length: number): Pr
   return output;
 }
 
-/** HKDF-Expand-Label per RFC 8446 §7.1 (label is prefixed with "tls13 "). */
+/** HKDF-Expand-Label per RFC 9846 §7.1 (label is prefixed with "tls13 "). */
 export async function hkdfExpandLabel(
   secret: Uint8Array,
   label: string,
@@ -214,7 +214,7 @@ export async function deriveSecret(secret: Uint8Array, label: string, messages: 
 }
 
 // ---------------------------------------------------------------------------
-// AES-128-GCM record layer (RFC 8446 §5.2). Real authenticated encryption.
+// AES-128-GCM record layer (RFC 9846 §5.2). Real authenticated encryption.
 // ---------------------------------------------------------------------------
 
 export async function aesGcmEncrypt(
@@ -252,7 +252,7 @@ export async function aesGcmDecrypt(
 }
 
 /**
- * Per-record nonce (RFC 8446 §5.3): the 64-bit record sequence number, padded
+ * Per-record nonce (RFC 9846 §5.3): the 64-bit record sequence number, padded
  * left to the IV length, XORed with the static write_iv. Distinct per record so
  * the same key never reuses a GCM nonce.
  */
