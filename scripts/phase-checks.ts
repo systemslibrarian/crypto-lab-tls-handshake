@@ -17,6 +17,7 @@ import {
   ed25519Sign,
   ed25519Verify,
   equalBytes,
+  hkdfExpand,
   hkdfExpandLabel,
   hkdfExtract,
   recordNonce,
@@ -344,6 +345,89 @@ function phaseDiscipline(): void {
   console.log('discipline gate (no Math.random in src/): PASS');
 }
 
+
+/* RFC 5869 Appendix A test vectors for HKDF-SHA-256, GROUND TRUTH for the
+ * Extract-and-Expand implementation in src/primitives.ts.
+ *
+ * COPIED FROM THE PUBLICATION, not reproduced from a library. The bytes were
+ * extracted from the RFC's own text at https://www.rfc-editor.org/rfc/rfc5869.txt
+ * and each one's length matches the octet count the RFC states beside it. A
+ * vector regenerated from WebCrypto would agree with this code for the same
+ * reason it agrees with itself, and would prove nothing.
+ *
+ * Only the three SHA-256 cases are here. A.4 to A.7 are SHA-1, which this lab
+ * does not implement, and asserting them would mean adding an algorithm to pass
+ * a test rather than testing the algorithm the lab has.
+ *
+ * Case A.3 is the one that mattered: its salt is absent, which RFC 5869 section
+ * 2.2 defines as HashLen zeros, and hkdfExtract passed the empty array straight
+ * to WebCrypto -- which throws `Zero-length key is not supported`. The existing
+ * RFC 8448 assertions could not catch it, because they exercise
+ * HKDF-Expand-Label with a 32-byte secret and never reach the default. */
+const RFC5869_SHA256_VECTORS = [
+  {
+    name: 'RFC 5869 Appendix A.1',
+    ikm:
+      '0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b',
+    salt:
+      '000102030405060708090a0b0c',
+    info:
+      'f0f1f2f3f4f5f6f7f8f9',
+    length: 42,
+    prk:
+      '077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5',
+    okm:
+      '3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf' +
+      '34007208d5b887185865',
+  },
+  {
+    name: 'RFC 5869 Appendix A.2',
+    ikm:
+      '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f' +
+      '202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f' +
+      '404142434445464748494a4b4c4d4e4f',
+    salt:
+      '606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f' +
+      '808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f' +
+      'a0a1a2a3a4a5a6a7a8a9aaabacadaeaf',
+    info:
+      'b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecf' +
+      'd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef' +
+      'f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff',
+    length: 82,
+    prk:
+      '06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244',
+    okm:
+      'b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c' +
+      '59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71' +
+      'cc30c58179ec3e87c14c01d5c1f3434f1d87',
+  },
+  {
+    name: 'RFC 5869 Appendix A.3',
+    ikm:
+      '0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b',
+    salt:'',
+    info:'',
+    length: 42,
+    prk:
+      '19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04',
+    okm:
+      '8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d' +
+      '9d201395faa4b61a96c8',
+  },
+] as const;
+
+async function phaseRfc5869(): Promise<void> {
+  for (const v of RFC5869_SHA256_VECTORS) {
+    const prk = await hkdfExtract(fromHex(v.salt), fromHex(v.ikm));
+    assert(equalBytes(prk, fromHex(v.prk)), `${v.name}: HKDF-Extract PRK does not match the published value`);
+    const okm = await hkdfExpand(prk, fromHex(v.info), v.length);
+    assert(equalBytes(okm, fromHex(v.okm)), `${v.name}: HKDF-Expand OKM does not match the published value`);
+    console.log(`PASS  ${v.name} -- PRK and ${v.length}-byte OKM match the published vector`);
+  }
+  console.log(`\n${RFC5869_SHA256_VECTORS.length * 2} published HKDF assertions matched (RFC 5869 Appendix A, SHA-256).`);
+}
+
 async function main(): Promise<void> {
   const phase = process.argv[2] ?? 'all';
   const run: Record<string, () => Promise<void> | void> = {
@@ -352,6 +436,7 @@ async function main(): Promise<void> {
     record: phaseRecord,
     handshake: phaseHandshake,
     discipline: phaseDiscipline,
+    rfc5869: phaseRfc5869,
   };
 
   if (phase === 'all') {
@@ -360,13 +445,14 @@ async function main(): Promise<void> {
     await phaseAuth();
     await phaseRecord();
     await phaseHandshake();
+    await phaseRfc5869();
     console.log('\nALL GATES PASS');
     return;
   }
 
   const fn = run[phase];
   if (!fn) {
-    throw new Error(`Usage: tsx scripts/phase-checks.ts <all|keyschedule|auth|record|handshake|discipline>`);
+    throw new Error(`Usage: tsx scripts/phase-checks.ts <all|keyschedule|auth|record|handshake|discipline|rfc5869>`);
   }
   await fn();
 }
