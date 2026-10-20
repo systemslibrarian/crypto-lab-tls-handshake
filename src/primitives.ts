@@ -150,12 +150,33 @@ export function ed25519Verify(signature: Uint8Array, message: Uint8Array, public
 // ---------------------------------------------------------------------------
 
 export async function hkdfExtract(salt: Uint8Array, ikm: Uint8Array): Promise<Uint8Array> {
-  const mac = await hmacSha256(salt, ikm);
+  /* An ABSENT salt is HashLen zeros, not an empty key. RFC 5869 section 2.2
+   * defines `salt` as "optional (if not provided, it is set to a string of
+   * HashLen zeros)", and its own Test Case 3 is exactly that case. Passing the
+   * empty array straight to WebCrypto instead threw `Zero-length key is not
+   * supported`, so this function could not compute the RFC's third published
+   * vector at all.
+   *
+   * Found by looking rather than by luck: the same defect was fixed in
+   * crypto-lab-pq-tls-handshake, and because that lab and this one share this
+   * file almost verbatim, the fleet was swept for the shape -- an HKDF-Extract
+   * built as HMAC(salt, ikm), where WebCrypto's HMAC importKey is what rejects
+   * the zero-length key. These two labs are the only ones that have it.
+   *
+   * No existing caller is affected: every call site in src/keyschedule.ts passes
+   * ZEROS or a 32-byte derived secret, so no key schedule output moves. This
+   * only makes the documented default reachable. */
+  const effectiveSalt = salt.length === 0 ? new Uint8Array(HASH_SIZE) : salt;
+  const mac = await hmacSha256(effectiveSalt, ikm);
   ensureLength(mac, HASH_SIZE, 'HKDF-Extract output');
   return mac;
 }
 
-async function hkdfExpand(prk: Uint8Array, info: Uint8Array, length: number): Promise<Uint8Array> {
+/* Exported so the RFC 5869 Appendix A vectors can exercise the Expand half
+ * directly; before this only HKDF-Expand-Label was reachable from a test, and
+ * that is the TLS 1.3 wrapper rather than the primitive the RFC publishes
+ * ground truth for. */
+export async function hkdfExpand(prk: Uint8Array, info: Uint8Array, length: number): Promise<Uint8Array> {
   if (length <= 0) {
     return new Uint8Array();
   }
