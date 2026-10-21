@@ -1,4 +1,5 @@
 import { expect, test as base, type Locator, type Page } from '@playwright/test';
+import { createHash, createHmac } from 'node:crypto';
 
 /**
  * Functional claim gate for the TLS 1.3 Handshake lab.
@@ -481,7 +482,7 @@ test('New session rotates the ephemeral material and keeps the long-term identit
   const snapshot = () =>
     page.evaluate(() => ({
       leaf: [...document.querySelectorAll('.chain .cert .mono')].map((e) => e.textContent?.trim() ?? ''),
-      schedule: [...document.querySelectorAll('.kstage .val')].map((e) => e.textContent ?? ''),
+      schedule: [...document.querySelectorAll('.panel:has(.deriv) .kstage .val')].map((e) => e.textContent ?? ''),
       secret: document.querySelector('.secret-bytes')?.textContent ?? '',
       record: document.querySelector('.record-grid .codebox.ct')?.textContent ?? '',
     }));
@@ -506,8 +507,8 @@ test('New session rotates the ephemeral material and keeps the long-term identit
   // the corrected claim to the observed behaviour.
   expect(after.schedule).toHaveLength(8);
   expect(after.schedule[0]).toBe(before.schedule[0]);
-  await expect(page.locator('.kstage .name').first()).toHaveText(/Early Secret\s+\(constant — no PSK\)/);
-  await expect(page.locator('.panel', { has: page.locator('.schedule') })).toContainText(
+  await expect(page.locator('.panel', { has: page.locator('.deriv') }).locator('.kstage .name').first()).toHaveText(/Early Secret\s+\(full handshake — no PSK\)/);
+  await expect(page.locator('.panel', { has: page.locator('.deriv') })).toContainText(
     'every secret below the Early Secret changes',
   );
   for (let i = 1; i < after.schedule.length; i++) {
@@ -558,7 +559,7 @@ test('record layer: the header, the ciphertext and the plaintext lengths agree',
 });
 
 test('key schedule: the worked derivation states the same length its own bars measure', async ({ page }) => {
-  await expect(page.locator('.kstage')).toHaveCount(8);
+  await expect(page.locator('.panel', { has: page.locator('.deriv') }).locator('.kstage')).toHaveCount(8);
   await page.locator('.deriv summary').click();
 
   const d = await page.evaluate(() => {
@@ -571,7 +572,7 @@ test('key schedule: the worked derivation states the same length its own bars me
       bars: [...document.querySelectorAll('.deriv-bar-len')].map((e) => e.textContent?.trim() ?? ''),
       parent: document.querySelector('.deriv-args .hl')?.textContent?.trim() ?? '',
       scheduleHandshakeSecret:
-        [...document.querySelectorAll('.kstage')]
+        [...document.querySelectorAll('.panel:has(.deriv) .kstage')]
           .find((k) => (k.querySelector('.name')?.textContent ?? '').startsWith('Handshake Secret'))
           ?.querySelector('.val')?.textContent ?? '',
       outName: document.querySelector('.deriv-out .deriv-k')?.textContent?.trim() ?? '',
@@ -589,4 +590,178 @@ test('key schedule: the worked derivation states the same length its own bars me
   expect(d.parent).toBe(d.scheduleHandshakeSecret);
   expect(d.args['label']).toContain('"s hs traffic"');
   expect(d.outName).toBe('server_handshake_traffic_secret');
+});
+
+// ---------------------------------------------------------------------------
+// Resumption, binder, compromise, and replay
+// ---------------------------------------------------------------------------
+
+function sha256Bytes(bytes: Uint8Array): Buffer {
+  return createHash('sha256').update(bytes).digest();
+}
+
+function hmac(key: Uint8Array, bytes: Uint8Array): Buffer {
+  return createHmac('sha256', key).update(bytes).digest();
+}
+
+function expandLabel(prk: Uint8Array, label: string, context: Uint8Array, length = 32): Buffer {
+  const fullLabel = Buffer.from(`tls13 ${label}`, 'ascii');
+  const info = Buffer.concat([
+    Buffer.from([(length >>> 8) & 0xff, length & 0xff, fullLabel.length]),
+    fullLabel,
+    Buffer.from([context.length]),
+    context,
+  ]);
+  const blocks: Buffer[] = [];
+  let previous = Buffer.alloc(0);
+  for (let counter = 1; Buffer.concat(blocks).length < length; counter += 1) {
+    previous = hmac(prk, Buffer.concat([previous, info, Buffer.from([counter])]));
+    blocks.push(previous);
+  }
+  return Buffer.concat(blocks).subarray(0, length);
+}
+
+async function selectReplayConfiguration(page: Page, configuration: string): Promise<void> {
+  await page.locator('#replayConfig').selectOption(configuration);
+  await page.locator('#recordEarlyBtn').click();
+  await expect(page.locator('#replayEarlyBtn')).toBeEnabled();
+  await page.locator('#replayEarlyBtn').click();
+  await expect(page.locator(`[data-verdict="replay-${configuration}"]`)).toBeVisible();
+}
+
+test('[verdict:binder-check] binder is independently re-derived from the PSK and exact truncated bytes', async ({ page }) => {
+  const raw = await page.locator('[data-claim="binder"]').evaluate((el) => ({
+    psk: (el as HTMLElement).dataset.psk ?? '',
+    truncated: (el as HTMLElement).dataset.truncatedClienthello ?? '',
+    full: (el as HTMLElement).dataset.fullClienthello ?? '',
+    rendered: (el as HTMLElement).dataset.renderedBinder ?? '',
+  }));
+  const psk = Buffer.from(raw.psk, 'hex');
+  const truncated = Buffer.from(raw.truncated, 'hex');
+  const full = Buffer.from(raw.full, 'hex');
+  expect(psk).toHaveLength(32);
+  expect(full.subarray(0, truncated.length).equals(truncated)).toBe(true);
+  expect(full.length).toBeGreaterThan(truncated.length);
+
+  // Independent Node crypto route: HKDF-Extract and HKDF-Expand are expressed
+  // directly as HMAC here; no production helper is imported into this test.
+  const earlySecret = hmac(Buffer.alloc(32), psk);
+  const binderKey = expandLabel(earlySecret, 'res binder', sha256Bytes(Buffer.alloc(0)));
+  const finishedKey = expandLabel(binderKey, 'finished', Buffer.alloc(0));
+  const expectedBinder = hmac(finishedKey, sha256Bytes(truncated)).toString('hex');
+  expect(raw.rendered).toBe(expectedBinder);
+  await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'true');
+
+  await page.locator('#flipIdentityBtn').click();
+  await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'false');
+  await expect(page.locator('.abort-field')).toContainText('pre_shared_key.binders[0]');
+  await expect(page.locator('.abort-field')).toContainText('no early plaintext released');
+});
+
+test('resumption wire claims and protocol edges are computed, bounded, and internally consistent', async ({ page }) => {
+  const lifetime = Number(await page.locator('[data-ticket-lifetime]').getAttribute('data-ticket-lifetime'));
+  expect(lifetime).toBeGreaterThan(0);
+  expect(lifetime).toBeLessThanOrEqual(604_800);
+  const psk = (await page.locator('[data-claim="ticket-psk"] [data-psk]').getAttribute('data-psk')) ?? '';
+  expect(psk).toMatch(/^[0-9a-f]{64}$/);
+  await expect(page.locator('[data-claim="binder"]')).toContainText(
+    'supported_versions → key_share → early_data → psk_key_exchange_modes → pre_shared_key',
+  );
+  const edgeResults = await page.locator('[data-edge]').evaluateAll((rows) =>
+    rows.map((row) => ({ edge: (row as HTMLElement).dataset.edge, ok: (row as HTMLElement).dataset.ok })),
+  );
+  expect(edgeResults).toHaveLength(5);
+  expect(edgeResults.every((edge) => edge.ok === 'true')).toBe(true);
+});
+
+test('mode toggle retires stale proof, while selecting the current mode is a no-op', async ({ page }) => {
+  const status = page.locator('.mode-status');
+  const schedule = page.locator('.resumption-schedule .val');
+  const before = await schedule.allTextContents();
+  await expect(status).toHaveAttribute('data-retired-count', '0');
+
+  await page.locator('[data-psk-mode="psk_dhe_ke"]').click();
+  await expect(status).toHaveAttribute('data-retired-count', '0');
+  await expect(page.locator('.retired')).toHaveCount(0);
+
+  await page.locator('[data-psk-mode="psk_ke"]').click();
+  await expect(status).toHaveAttribute('data-mode', 'psk_ke');
+  await expect(status).toHaveAttribute('data-retired-count', '1');
+  await expect(status).toContainText('Previous computed verdict retired (1)');
+  await expect(status).toContainText('MUST NOT carry a key_share');
+  expect(await schedule.allTextContents()).not.toEqual(before);
+
+  await page.locator('[data-psk-mode="psk_ke"]').click();
+  await expect(status).toHaveAttribute('data-retired-count', '1');
+});
+
+test('[verdict:stek-psk-ke] [verdict:stek-psk-dhe] leaked STEK exposes exactly the PSK-derived recordings', async ({ page }) => {
+  await page.locator('#leakStekBtn').click();
+  const result = page.locator('[data-claim="stek-leak"]');
+  await expect(result).toHaveAttribute('data-psk-ke-early', 'true');
+  await expect(result).toHaveAttribute('data-psk-ke-one-rtt', 'true');
+  await expect(result).toHaveAttribute('data-psk-dhe-early', 'true');
+  await expect(result).toHaveAttribute('data-psk-dhe-one-rtt', 'false');
+  await expect(page.locator('[data-verdict="stek-psk-ke"]')).toHaveAttribute('data-ok', 'false');
+  await expect(page.locator('[data-verdict="stek-psk-dhe"]')).toHaveAttribute('data-ok', 'false');
+  await expect(page.locator('[data-verdict="stek-psk-ke"]')).toContainText('ALARM — PAST SESSION READ');
+  await expect(page.locator('[data-verdict="stek-psk-dhe"]')).toContainText('1-RTT HOLDS — 0-RTT EXPOSED');
+});
+
+const REPLAY_EXPECTATIONS = [
+  { id: 'no-anti-replay', count: 2, ok: false, sameRegions: true, verdict: 'ALARM — EXECUTED TWICE' },
+  { id: 'single-use-ticket', count: 1, ok: true, sameRegions: true, verdict: 'REPLAY REFUSED — TICKET ALREADY USED' },
+  { id: 'clienthello-recording', count: 1, ok: false, sameRegions: false, verdict: 'ALARM — REGION B EXECUTED' },
+  { id: 'freshness-window', count: 2, ok: false, sameRegions: true, verdict: 'ALARM — INSIDE WINDOW EXECUTED TWICE' },
+  { id: 'ignore-0rtt', count: 1, ok: true, sameRegions: true, verdict: 'REPLAY REFUSED — 1-RTT BINDS SERVER NONCE' },
+] as const;
+
+for (const expected of REPLAY_EXPECTATIONS) {
+  test(`[verdict:replay-${expected.id}] ${expected.id} verdict equals the server execution log`, async ({ page }) => {
+    await selectReplayConfiguration(page, expected.id);
+    const regions = await page.locator('.server-tile').evaluateAll((tiles) => tiles.map((tile) => ({
+      count: Number((tile.querySelector('.payment-count') as HTMLElement).dataset.count),
+      rows: [...tile.querySelectorAll('.arrival-log li')].map((row) => ({
+        arrival: (row as HTMLElement).dataset.arrival,
+        executed: (row as HTMLElement).dataset.executed === 'true',
+        reason: row.textContent?.replace(/\s+/g, ' ').trim(),
+      })),
+    })));
+    expect(regions).toHaveLength(2);
+    for (const region of regions) {
+      expect(region.count).toBe(region.rows.filter((row) => row.executed).length);
+    }
+    expect(regions[0]!.count).toBe(expected.count);
+    expect(regions[0]).toEqual(expected.sameRegions ? regions[1] : expect.not.objectContaining(regions[1]!));
+    if (!expected.sameRegions) expect(regions[0]).not.toEqual(regions[1]);
+    const marker = page.locator(`[data-verdict="replay-${expected.id}"]`);
+    await expect(marker).toHaveAttribute('data-ok', String(expected.ok));
+    await expect(marker).toContainText(expected.verdict);
+  });
+}
+
+test('[verdict:one-rtt-fallback] freshness rejection preserves a computed 1-RTT fallback', async ({ page }) => {
+  const edge = page.locator('[data-edge="freshness"]');
+  await expect(edge).toHaveAttribute('data-ok', 'true');
+  await expect(edge).toContainText('reject 0-RTT, proceed with 1-RTT');
+  await expect(page.locator('[data-verdict="one-rtt-fallback"]')).toHaveAttribute('data-ok', 'true');
+});
+
+test('negative claim: authenticated 0-RTT can still execute twice', async ({ page }) => {
+  await selectReplayConfiguration(page, 'no-anti-replay');
+  const fixture = page.locator('[data-claim="0rtt-negative"]');
+  await expect(fixture).toBeVisible();
+  await expect(fixture.locator('.evidence-check.good')).toHaveCount(3);
+  const executed = await page.locator('[data-region="A"] [data-executed="true"]').count();
+  expect(executed).toBe(2);
+  await expect(page.locator('[data-region="A"] .payment-count')).toHaveAttribute('data-count', '2');
+  const accepted = await page.locator('[data-region="A"] [data-executed="true"]').evaluateAll((rows) =>
+    rows.every((row) =>
+      (row as HTMLElement).dataset.ticketValid === 'true' &&
+      (row as HTMLElement).dataset.binderValid === 'true' &&
+      (row as HTMLElement).dataset.decrypted === 'true'),
+  );
+  expect(accepted).toBe(true);
+  await expect(fixture).toContainText('AUTHENTICATED — AND REPLAYED');
+  await expect(fixture).toContainText('A valid PSK binder and a valid ticket do not make 0-RTT data replay-safe.');
 });

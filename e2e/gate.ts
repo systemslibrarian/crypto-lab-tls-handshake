@@ -7,7 +7,7 @@ import { NONTEXT_BASELINE } from './nontext-baseline';
 export const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
 
 /** A phone-width viewport, for the WCAG 1.4.10 reflow half of the gate. */
-export const NARROW = { width: 380, height: 800 };
+export const NARROW = { width: 320, height: 800 };
 
 /** The handshake this lab walks: eight messages, ClientHello to Application Data. */
 export const STEP_COUNT = 8;
@@ -138,6 +138,9 @@ export async function boot(page: Page, theme: 'dark' | 'light'): Promise<void> {
   await expect(page.locator('.shell')).toBeVisible();
   await expect(page.locator('.msg')).toHaveCount(STEP_COUNT);
   await expect(page.locator('.progress')).toHaveText(`Step 1 / ${STEP_COUNT}`);
+  await expect(page.locator('[data-resumption-marker]')).toHaveCount(1);
+  await expect(page.locator('[data-psk-mode]')).toHaveCount(2);
+  await expect(page.locator('#replayConfig')).toHaveCount(1);
   // The regions that carry the lab's claims do not exist here, which is the
   // whole reason `driveAllStates` exists.
   await expect(page.locator('.mitm-box')).toHaveCount(0);
@@ -574,6 +577,38 @@ export async function driveAllStates(page: Page, theme: string): Promise<void> {
   await expect(page.locator('.mitm-checks .mc-bad')).toHaveCount(0);
 
   // ── A new session ─────────────────────────────────────────────────────────
+  // Resumption's dynamically revealed results are part of the same a11y gate.
+  await page.locator('#flipIdentityBtn').click();
+  await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'false');
+  await scanAt('resumption binder mismatch');
+  await page.locator('#flipIdentityBtn').click();
+  await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'true');
+
+  await page.locator('[data-psk-mode="psk_ke"]').click();
+  await expect(page.locator('.mode-status')).toHaveAttribute('data-mode', 'psk_ke');
+  await scanAt('weak PSK-only resumption mode');
+  await page.locator('[data-psk-mode="psk_dhe_ke"]').click();
+
+  await page.locator('#leakStekBtn').click();
+  await expect(page.locator('.leak-results')).toBeVisible();
+  await scanAt('ticket key leaked');
+
+  for (const configuration of [
+    'no-anti-replay',
+    'single-use-ticket',
+    'clienthello-recording',
+    'freshness-window',
+    'ignore-0rtt',
+  ]) {
+    await page.locator('#replayConfig').selectOption(configuration);
+    await page.locator('#recordEarlyBtn').click();
+    await expect(page.locator('[data-arrival="original"]').first()).toBeVisible();
+    await scanAt(`0-RTT ${configuration}, original recorded`);
+    await page.locator('#replayEarlyBtn').click();
+    await expect(page.locator(`[data-verdict="replay-${configuration}"]`)).toBeVisible();
+    await scanAt(`0-RTT ${configuration}, replay delivered`);
+  }
+
   await page.locator('#resetBtn').click();
   await expect(page.locator('.progress')).toHaveText(`Step 1 / ${STEP_COUNT}`);
   await expect(page.locator('.mitm-box')).toHaveCount(0);

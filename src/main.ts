@@ -10,6 +10,23 @@ import {
   type MitmResult,
   type DerivationView,
 } from './handshake';
+import { REPLAY_CONFIGURATIONS, type ReplayConfiguration } from './antireplay';
+import type { PskMode } from './clienthello-psk';
+import { toHex } from './primitives';
+import {
+  DEFAULT_PSK_MODE,
+  DEFAULT_REPLAY_MODE,
+  createResumptionLab,
+  runBinderProbe,
+  runEdgeCases,
+  runReplayScenario,
+  runStekLeak,
+  type BinderProbe,
+  type EdgeCases,
+  type LeakComparison,
+  type ReplayScenario,
+  type ResumptionLab,
+} from './resumption-lab';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) {
@@ -25,15 +42,35 @@ interface State {
   autoTimer: number | null;
   /** +1 when the last navigation moved forward (fly the packet); 0 = no fly. */
   flyDelta: number;
+  resumption: ResumptionLab;
+  pskMode: PskMode;
+  binderProbe: BinderProbe;
+  edgeCases: EdgeCases;
+  leak: LeakComparison | null;
+  replayConfiguration: ReplayConfiguration;
+  replayStage: 'idle' | 'recorded' | 'replayed';
+  replay: ReplayScenario | null;
+  retiredVerdicts: number;
 }
 
+const initialTrace = await runFullHandshake();
+const initialResumption = await createResumptionLab(initialTrace);
 const state: State = {
-  trace: await runFullHandshake(),
+  trace: initialTrace,
   step: 0,
   mitm: null,
   autoPlay: false,
   autoTimer: null,
   flyDelta: 0,
+  resumption: initialResumption,
+  pskMode: DEFAULT_PSK_MODE,
+  binderProbe: await runBinderProbe(initialResumption, DEFAULT_PSK_MODE, false),
+  edgeCases: await runEdgeCases(initialResumption),
+  leak: null,
+  replayConfiguration: DEFAULT_REPLAY_MODE,
+  replayStage: 'idle',
+  replay: null,
+  retiredVerdicts: 0,
 };
 
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -48,6 +85,13 @@ function pill(ok: boolean, label: string, alarmOnFail = false): string {
   const cls = ok ? 'good' : alarmOnFail ? 'alarm' : 'bad';
   const icon = ok ? '✓' : '✗';
   return `<span class="pill ${cls}">${icon} ${esc(label)}</span>`;
+}
+
+/** Verdict marker: every new marker has one recorded source mutation. */
+function markedPill(ok: boolean, label: string, verdict: string, alarmOnFail = false): string {
+  const cls = ok ? 'good' : alarmOnFail ? 'alarm' : 'bad';
+  const icon = ok ? '✓' : '✗';
+  return `<span class="pill ${cls}" data-verdict="${esc(verdict)}" data-ok="${ok}">${icon} ${esc(label)}</span>`;
 }
 
 function lockBadge(kind: HandshakeStep['encrypted']): string {
@@ -204,7 +248,7 @@ function simulatorSection(t: HandshakeTrace): string {
       computed for real — the keys are derived from this session's X25519 secret and the transcript hashes are SHA-256
       over the actual message bytes. The message framing is real TLS too, with one exception: the
       <code>Certificate</code> body uses a demo encoding rather than DER X.509, so its byte count is this demo's, not a
-      real chain's. <a href="#scope">Section 8</a> lists what is and is not modelled. Click a message, use the Step
+      real chain's. <a href="#scope">Section 9</a> lists what is and is not modelled. Click a message, use the Step
       controls, or press ← / → .</p>
     <div class="controls">
       <button class="btn" id="prevBtn" aria-label="Previous step">◀ Back</button>
@@ -378,7 +422,7 @@ function scheduleSection(t: HandshakeTrace): string {
       HKDF to derive a tree of independent secrets — one per direction, per phase — so compromising one never exposes
       the others. Every value below is the real HKDF output for this session.</p>
     <div class="schedule">
-      ${row('Extract', 'Early Secret  (constant — no PSK)', k.earlySecret)}
+      ${row('Extract', 'Early Secret  (full handshake — no PSK)', k.earlySecret)}
       ${row('Extract', 'Handshake Secret  (← ECDHE)', k.handshakeSecret)}
       ${row('Derive', 'client handshake traffic', k.clientHandshakeTrafficSecret, true)}
       ${row('Derive', 'server handshake traffic', k.serverHandshakeTrafficSecret, true)}
@@ -468,10 +512,181 @@ function recordSection(t: HandshakeTrace): string {
   </section>`;
 }
 
+function resumptionSection(): string {
+  const lab = state.resumption;
+  const session = lab.sessions[state.pskMode];
+  const ticket = lab.issued.ticket;
+  const probe = state.binderProbe;
+  const replay = state.replay;
+  const replayVisible = replay && state.replayStage === 'replayed';
+  const visibleLog = (region: 'regionA' | 'regionB') => {
+    if (!replay || state.replayStage === 'idle') return [];
+    const log = replay[region].log;
+    return state.replayStage === 'recorded' ? log.filter((entry) => entry.arrival === 'original') : log;
+  };
+  const count = (region: 'regionA' | 'regionB') => visibleLog(region).filter((entry) => entry.executedPayment).length;
+  const logRows = (region: 'regionA' | 'regionB'): string => visibleLog(region)
+    .map((entry) => `<li data-arrival="${entry.arrival}" data-executed="${entry.executedPayment}" data-ticket-valid="${entry.ticketValid}"
+        data-binder-valid="${entry.binderValid}" data-decrypted="${entry.earlyDataDecrypted}">
+        <strong>${entry.arrival === 'original' ? 'original' : 'replay'}</strong> — ${esc(entry.reason)}
+        ${entry.executedPayment ? '<span class="execution">EXECUTED</span>' : '<span>not executed</span>'}
+      </li>`).join('') || '<li>No arrival processed yet.</li>';
+  const replayVerdict = replayVisible
+    ? markedPill(replay.verdictOk, replay.verdict, `replay-${replay.configuration}`, true)
+    : '';
+  const modeName = state.pskMode === 'psk_dhe_ke' ? 'psk_dhe_ke (PSK + fresh X25519)' : 'psk_ke (PSK only — weak)';
+  const scheduleRow = (name: string, value: Uint8Array): string =>
+    `<div class="kstage"><span class="tag">Derive</span><span class="name">${esc(name)}</span><span class="val">${esc(shortHex(value))}</span></div>`;
+  const leak = state.leak;
+  const negativeFixture = replayVisible && replay.configuration === 'no-anti-replay'
+    ? `<div class="negative-fixture" data-claim="0rtt-negative">
+        <div class="evidence-checks" role="group" aria-label="Authentication evidence">
+          <span class="evidence-check good" data-check="ticket">✓ ticket VALID</span>
+          <span class="evidence-check good" data-check="binder">✓ binder VALID</span>
+          <span class="evidence-check good" data-check="decrypt">✓ early data DECRYPTED</span>
+        </div>
+        <strong>AUTHENTICATED — AND REPLAYED</strong>
+        <p>A valid PSK binder and a valid ticket do not make 0-RTT data replay-safe.</p>
+      </div>`
+    : '';
+
+  return `
+  <section class="panel resumption-panel" id="resumption" data-resumption-marker="resumption-0rtt-replay-v1">
+    <h2><span class="section-num">7</span> Resumption &amp; 0-RTT</h2>
+    <p class="lead">After a full handshake the server can hand the client a ticket. Next time, the client can skip the
+      certificate check — and can even send data in its very first message. That first-message data is fast, and it can
+      be replayed.</p>
+
+    <div class="act">
+      <h3>Act A · Ticket → PSK</h3>
+      <p class="lead">The server derives a <strong>resumption secret</strong> from the full handshake's Main Secret, then
+        derives one PSK using the ticket nonce. The opaque ticket format is this lab's explicit model: AES-128-GCM under
+        an in-memory server-only ticket-encryption key (STEK). TLS leaves those opaque contents to the server.</p>
+      <div class="ticket-card" data-ticket-wire="${toHex(ticket.wire)}">
+        <div><span class="term" tabindex="0" role="note" aria-label="Maximum period for which this ticket can be used, in seconds.">ticket_lifetime</span><output data-ticket-lifetime="${ticket.ticketLifetime}">${ticket.ticketLifetime} s</output></div>
+        <div><span class="term" tabindex="0" role="note" aria-label="Random 32-bit value added to ticket age so passive observers cannot correlate it directly.">ticket_age_add</span><output>${ticket.ticketAgeAdd}</output></div>
+        <div><span class="term" tabindex="0" role="note" aria-label="Per-ticket value used to derive this ticket's PSK.">ticket_nonce</span><output>${toHex(ticket.ticketNonce)}</output></div>
+        <div><span class="term" tabindex="0" role="note" aria-label="Server-encrypted state sent to the client and returned as a PSK identity.">opaque ticket</span><output class="scroll-value" tabindex="0">${toHex(ticket.ticket)}</output></div>
+        <div><span class="term" tabindex="0" role="note" aria-label="Largest early application-data payload this ticket permits.">early_data.max_early_data_size</span><output>${ticket.maxEarlyDataSize} B</output></div>
+      </div>
+      <div class="derive-line" data-claim="ticket-psk">
+        <code>Derive-Secret(Main Secret, "res master", Hash(CH..client Finished))</code>
+        <span aria-hidden="true">↓</span>
+        <code>HKDF-Expand-Label(resumption secret, "resumption", ticket_nonce, 32)</code>
+        <output class="scroll-value" tabindex="0" data-psk="${toHex(lab.issued.psk)}">PSK ${toHex(lab.issued.psk)}</output>
+      </div>
+    </div>
+
+    <div class="act">
+      <h3>Act B · Resume and bind the ClientHello</h3>
+      <p class="lead"><code>pre_shared_key</code> is last. The binder authenticates the exact truncated ClientHello
+        through the identities vector; only after it verifies may the server touch early plaintext.</p>
+      <div class="mode-buttons" role="group" aria-label="PSK key-establishment mode">
+        <button class="btn ${state.pskMode === 'psk_dhe_ke' ? 'primary' : ''}" data-psk-mode="psk_dhe_ke" aria-pressed="${state.pskMode === 'psk_dhe_ke'}">psk_dhe_ke (default)</button>
+        <button class="btn weak ${state.pskMode === 'psk_ke' ? 'primary' : ''}" data-psk-mode="psk_ke" aria-pressed="${state.pskMode === 'psk_ke'}">psk_ke · weak</button>
+      </div>
+      <p class="mode-status" data-mode="${state.pskMode}" data-retired-count="${state.retiredVerdicts}">
+        Active: <strong>${esc(modeName)}</strong>. ${session.serverSentKeyShare ? 'ServerHello carries a fresh X25519 key_share.' : 'ServerHello MUST NOT carry a key_share in this PSK-only mode.'}
+        ${state.retiredVerdicts ? `<span class="retired">Previous computed verdict retired (${state.retiredVerdicts}).</span>` : ''}
+      </p>
+      <div class="schedule resumption-schedule">
+        ${scheduleRow('Early Secret ← HKDF-Extract(0, PSK)', session.schedule.earlySecret)}
+        ${scheduleRow('client early traffic', session.schedule.clientEarlyTrafficSecret)}
+        ${scheduleRow(`Handshake Secret ← ${state.pskMode === 'psk_dhe_ke' ? 'fresh X25519' : 'all-zero input'}`, session.schedule.handshakeSecret)}
+        ${scheduleRow('client handshake traffic', session.schedule.clientHandshakeTrafficSecret)}
+        ${scheduleRow('server handshake traffic', session.schedule.serverHandshakeTrafficSecret)}
+        ${scheduleRow('Main Secret', session.schedule.mainSecret)}
+        ${scheduleRow('client application traffic', session.schedule.clientApplicationTrafficSecret)}
+        ${scheduleRow('server application traffic', session.schedule.serverApplicationTrafficSecret)}
+      </div>
+      <div class="binder-work" data-claim="binder" data-psk="${toHex(lab.issued.psk)}"
+        data-truncated-clienthello="${session.clientHello.truncatedHex}" data-full-clienthello="${session.clientHello.fullHex}"
+        data-rendered-binder="${toHex(session.clientHello.binder)}">
+        <p><strong>Extension order:</strong> <code>${session.clientHello.extensionOrder.join(' → ')}</code></p>
+        <p><strong>Binder transcript:</strong> ${session.clientHello.truncated.length} B truncated / ${session.clientHello.full.length} B full; enclosing lengths already describe the full message.</p>
+        <p class="mono">binder = HMAC(finished_key, SHA-256(truncated ClientHello)) = <span class="hl">${toHex(session.clientHello.binder)}</span></p>
+        <div class="verdicts">
+          ${markedPill(probe.valid, probe.valid ? 'binder VALID' : 'binder INVALID', 'binder-check', true)}
+        </div>
+        <p class="abort-field">${probe.valid ? 'Server may now consider early_data.' : `ABORT FIELD: ${esc(probe.field)} — no early plaintext released.`}</p>
+        <button class="btn" id="flipIdentityBtn">${probe.valid ? 'Flip one identity byte' : 'Restore genuine identity'}</button>
+      </div>
+    </div>
+
+    <div class="act">
+      <h3>Act C · Leak the ticket key</h3>
+      <p class="lead">The attack gets only recorded ClientHello, ServerHello and record bytes plus the leaked STEK.
+        It opens the ticket and recovers the PSK. Fresh X25519 protects resumed 1-RTT traffic, but cannot protect the
+        already-recorded 0-RTT record because that key came from the PSK alone.</p>
+      <button class="btn danger" id="leakStekBtn">Leak the ticket key</button>
+      ${leak ? `<div class="leak-results" data-claim="stek-leak"
+          data-psk-ke-early="${leak.pskKe.earlyDataReadable}" data-psk-ke-one-rtt="${leak.pskKe.oneRttReadable}"
+          data-psk-dhe-early="${leak.pskDhe.earlyDataReadable}" data-psk-dhe-one-rtt="${leak.pskDhe.oneRttReadable}">
+          <div class="card">
+            <h4>psk_ke recording</h4>
+            ${markedPill(!leak.pskKe.oneRttReadable, leak.pskKe.oneRttReadable ? 'ALARM — PAST SESSION READ' : 'PAST SESSION SEALED', 'stek-psk-ke', true)}
+            <p>0-RTT: ${leak.pskKe.earlyDataReadable ? 'READ' : 'sealed'} · 1-RTT: ${leak.pskKe.oneRttReadable ? 'READ' : 'sealed'}</p>
+          </div>
+          <div class="card">
+            <h4>psk_dhe_ke recording</h4>
+            ${markedPill(!(leak.pskDhe.earlyDataReadable && !leak.pskDhe.oneRttReadable), '1-RTT HOLDS — 0-RTT EXPOSED', 'stek-psk-dhe', true)}
+            <p>0-RTT: ${leak.pskDhe.earlyDataReadable ? 'READ' : 'sealed'} · 1-RTT: ${leak.pskDhe.oneRttReadable ? 'READ' : 'sealed'}</p>
+          </div>
+        </div>` : '<p class="lead">No ticket key has been leaked.</p>'}
+    </div>
+
+    <div class="act replay-console">
+      <h3>Act D · Record and replay a 0-RTT bill payment</h3>
+      <p class="lead">The attacker copies only the first ClientHello and encrypted early-data record, then sends those
+        same bytes again. Pick the server policy and compare what each region actually executed.</p>
+      <label class="select-label" for="replayConfig">Server configuration</label>
+      <select id="replayConfig">
+        ${REPLAY_CONFIGURATIONS.map((choice) => `<option value="${choice.id}" ${choice.id === state.replayConfiguration ? 'selected' : ''}>${esc(choice.label)}${choice.broken ? ' — BROKEN' : ''}</option>`).join('')}
+      </select>
+      <div class="controls">
+        <button class="btn" id="recordEarlyBtn">Record original flight</button>
+        <button class="btn danger" id="replayEarlyBtn" ${state.replayStage === 'idle' ? 'disabled' : ''}>Replay captured bytes</button>
+      </div>
+      <div class="region-grid" data-configuration="${state.replayConfiguration}">
+        ${(['regionA', 'regionB'] as const).map((region, index) => `<div class="server-tile" data-region="${index ? 'B' : 'A'}">
+          <h4>region ${index ? 'B' : 'A'}</h4>
+          <output class="payment-count" data-count="${count(region)}">executed payments: ${count(region)}</output>
+          <ol class="arrival-log">${logRows(region)}</ol>
+        </div>`).join('')}
+      </div>
+      <div class="verdicts">${replayVerdict}</div>
+      ${negativeFixture}
+      <p class="lead replay-explainer">Single-use tickets share a used-ticket set here. ClientHello recording is
+        deliberately local, so region B can accept the same bytes. A freshness window rejects late copies but cannot
+        stop a copy sent inside the window. Ignoring 0-RTT moves execution behind the handshake, whose fresh server
+        nonce changes the 1-RTT key.</p>
+      <p class="lead">Another replay use is observational: repeating a balance query and watching response lengths can
+        leak changes even when the attacker cannot read the response. RFC 9846 Appendix F.5 discusses these replay
+        threats.</p>
+    </div>
+
+    <div class="act edge-cases" data-claim="edge-cases">
+      <h3>Protocol edges</h3>
+      <div class="verdicts">${markedPill(state.edgeCases.freshnessFallback.oneRttFallback, '1-RTT FALLBACK AVAILABLE', 'one-rtt-fallback', true)}</div>
+      <ul>
+        <li data-edge="expired" data-ok="${state.edgeCases.expiredTicket.oneRttFallback}">Expired ticket → full handshake: ${esc(state.edgeCases.expiredTicket.reason)}</li>
+        <li data-edge="tampered" data-ok="${state.edgeCases.tamperedTicket.oneRttFallback}">Tampered ticket AEAD → full handshake: ${esc(state.edgeCases.tamperedTicket.reason)}</li>
+        <li data-edge="untruncated" data-ok="${!state.edgeCases.untruncatedBinderValid}">Binder over the untruncated ClientHello → mismatch (the binder bytes must be excluded).</li>
+        <li data-edge="mode" data-ok="${state.edgeCases.pskKeRejectedByDheOnlyServer}"><code>psk_ke</code> offered to a DHE-only server → full handshake.</li>
+        <li data-edge="freshness" data-ok="${state.edgeCases.freshnessFallback.oneRttFallback}">Age outside tolerance → reject 0-RTT, proceed with 1-RTT.</li>
+      </ul>
+    </div>
+    <p class="sources lead"><strong>Primary sources:</strong>
+      <a href="https://www.rfc-editor.org/rfc/rfc9846">RFC 9846</a> §§2.3, 4.3.9–11, 4.7.1, 7.1, 8.1–3 and F.5;
+      <a href="https://www.rfc-editor.org/rfc/rfc8448">RFC 8448</a> §§3–4 published traces; and
+      <a href="https://toc.cryptobook.us/book.pdf">Boneh–Shoup v0.6</a> §21.10.1.</p>
+  </section>`;
+}
+
 function comparisonSection(): string {
   return `
   <section class="panel">
-    <h2><span class="section-num">7</span> TLS 1.3 vs 1.2 &amp; Takeaways</h2>
+    <h2><span class="section-num">8</span> TLS 1.3 vs 1.2 &amp; Takeaways</h2>
     <table>
       <caption class="lead">How TLS 1.3 cleaned up the handshake</caption>
       <thead><tr><th>Property</th><th>TLS 1.2</th><th>TLS 1.3</th></tr></thead>
@@ -509,6 +724,7 @@ const SCOPE: { heading: string; bullets: string[] }[] = [
       'The RFC 9846 §4.5.2 CertificateVerify content: 64 octets of 0x20, the context string, 0x00, then the transcript hash.',
       'HMAC Finished verify_data over the running transcript, and AES-128-GCM record protection with the write_iv ⊕ sequence-number nonce and the record header as AAD.',
       'TLS handshake-message framing (type ‖ 3-byte length) and the real ClientHello / ServerHello body and extension encoding.',
+      'PSK resumption, a correctly truncated binder transcript, psk_dhe_ke / psk_ke schedules, real 0-RTT records, and five computed replay-admission policies.',
     ],
   },
   {
@@ -518,7 +734,7 @@ const SCOPE: { heading: string; bullets: string[] }[] = [
       'Hostname / SAN verification. Nothing checks that the certificate names the host you connected to. Chain validation here is exactly three things: the root matches the trust anchor, the root self-signature verifies, and the leaf is signed by the root.',
       'Certificate validity periods, key usage / extended key usage, name constraints, path length, and revocation (CRL, OCSP, stapling). None of them exist in this model.',
       'A real trust store. The trust anchor is a root generated in this page, not one shipped by your browser or OS.',
-      'PSK and session resumption, 0-RTT early data, HelloRetryRequest, client certificate authentication, ALPN/SNI handling, post-handshake messages, and KeyUpdate.',
+      'HelloRetryRequest, client certificate authentication, ALPN/SNI handling, general post-handshake messages, and KeyUpdate.',
       'Algorithm negotiation. One cipher suite (TLS_AES_128_GCM_SHA256) and one group (x25519); nothing is chosen or downgraded.',
       'Constant-time execution. This is JavaScript in a browser and makes no side-channel guarantees.',
     ],
@@ -529,6 +745,7 @@ const SCOPE: { heading: string; bullets: string[] }[] = [
       'Only the application-data record is actually AEAD-sealed. Messages badged "🔒 handshake key" are computed and framed for real, and their contents really are what a TLS 1.3 server would send at that point, but they are not separately encrypted into records here — the badge describes the layer they belong to, not an encryption step this demo performed.',
       'The server\'s "long-term" Ed25519 leaf key persists for the lifetime of the page, not across reloads. Nothing is stored.',
       'Both endpoints run in the same JavaScript context. There is no network, no record fragmentation, and no timing behaviour to observe.',
+      'The stateless ticket is a labelled teaching format: AES-128-GCM under one in-memory STEK over the PSK and minimal policy state. RFC 9846 intentionally leaves ticket contents opaque.',
       'The MITM exhibit attacks this session\'s real material: the real ClientHello, the real EncryptedExtensions, the real chain, and the real CertificateVerify signature. The transcript hashes it compares are SHA-256 over the bytes each party actually received, and every verdict is the output of the same verification the honest handshake runs.',
     ],
   },
@@ -537,7 +754,7 @@ const SCOPE: { heading: string; bullets: string[] }[] = [
 function scopeSection(): string {
   return `
   <section class="panel" id="scope">
-    <h2><span class="section-num">8</span> Scope — What This Demo Does and Does Not Model</h2>
+    <h2><span class="section-num">9</span> Scope — What This Demo Does and Does Not Model</h2>
     <p class="lead">The cryptography here is real, which is exactly why the boundaries need stating: a demo that looks
       like TLS is easy to mistake for TLS. Everything below describes this page, not the protocol.</p>
     <div class="scope-cards">
@@ -606,6 +823,7 @@ function render(): void {
       ${authSection(t)}
       ${scheduleSection(t)}
       ${recordSection(t)}
+      ${resumptionSection()}
       ${comparisonSection()}
       ${scopeSection()}
     </main>
@@ -621,6 +839,21 @@ function go(step: number): void {
   render();
 }
 
+async function replaceTrace(trace: HandshakeTrace): Promise<void> {
+  const resumption = await createResumptionLab(trace);
+  state.trace = trace;
+  state.resumption = resumption;
+  state.pskMode = DEFAULT_PSK_MODE;
+  state.binderProbe = await runBinderProbe(resumption, DEFAULT_PSK_MODE, false);
+  state.edgeCases = await runEdgeCases(resumption);
+  state.leak = null;
+  state.replayConfiguration = DEFAULT_REPLAY_MODE;
+  state.replayStage = 'idle';
+  state.replay = null;
+  state.retiredVerdicts = 0;
+  state.mitm = null;
+}
+
 function wire(): void {
   document.querySelector('#nextBtn')?.addEventListener('click', () => {
     stopAuto();
@@ -632,8 +865,7 @@ function wire(): void {
   });
   document.querySelector('#resetBtn')?.addEventListener('click', async () => {
     stopAuto();
-    state.trace = await runFullHandshake(state.trace.serverName, state.trace.fault);
-    state.mitm = null;
+    await replaceTrace(await runFullHandshake(state.trace.serverName, state.trace.fault));
     state.step = 0;
     render();
   });
@@ -643,8 +875,7 @@ function wire(): void {
       // Re-run the real handshake with the fault injected. Nothing about the
       // verdicts below is precomputed for the fault case — they come back out of
       // the same verifyFinished / verifyCertificateVerify calls as the honest run.
-      state.trace = await runFullHandshake(state.trace.serverName, btn.dataset.fault as HandshakeFault);
-      state.mitm = null;
+      await replaceTrace(await runFullHandshake(state.trace.serverName, btn.dataset.fault as HandshakeFault));
       render();
     });
   });
@@ -682,6 +913,47 @@ function wire(): void {
       stopAuto();
       go(Number(btn.dataset.step));
     });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-psk-mode]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const next = btn.dataset.pskMode as PskMode;
+      // A same-value click is a genuine no-op: it must not retire fresh proof.
+      if (next === state.pskMode) return;
+      state.pskMode = next;
+      state.retiredVerdicts += 1;
+      state.binderProbe = await runBinderProbe(state.resumption, next, false);
+      state.leak = null;
+      state.replayStage = 'idle';
+      state.replay = null;
+      render();
+    });
+  });
+  document.querySelector('#flipIdentityBtn')?.addEventListener('click', async () => {
+    state.binderProbe = await runBinderProbe(state.resumption, state.pskMode, state.binderProbe.valid);
+    render();
+  });
+  document.querySelector('#leakStekBtn')?.addEventListener('click', async () => {
+    state.leak = await runStekLeak(state.resumption);
+    render();
+  });
+  document.querySelector<HTMLSelectElement>('#replayConfig')?.addEventListener('change', (event) => {
+    const next = (event.currentTarget as HTMLSelectElement).value as ReplayConfiguration;
+    if (next === state.replayConfiguration) return;
+    state.replayConfiguration = next;
+    state.replayStage = 'idle';
+    state.replay = null;
+    render();
+  });
+  document.querySelector('#recordEarlyBtn')?.addEventListener('click', async () => {
+    state.replay = await runReplayScenario(state.resumption, state.replayConfiguration);
+    state.replayStage = 'recorded';
+    render();
+  });
+  document.querySelector('#replayEarlyBtn')?.addEventListener('click', () => {
+    if (!state.replay) return;
+    state.replayStage = 'replayed';
+    render();
   });
 
   animatePacket();

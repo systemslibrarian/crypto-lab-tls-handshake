@@ -17,9 +17,9 @@
  *                  +--> Derive-Secret(., "c ap traffic", CH..server Finished)
  *                  +--> Derive-Secret(., "s ap traffic", CH..server Finished)
  *
- * This demo uses the (EC)DHE-only path (no PSK / 0-RTT), which is the common
- * full handshake. Every value below is a real HKDF output, derived from the
- * actual session's X25519 secret and message transcript.
+ * `deriveKeySchedule` below remains the (EC)DHE-only full-handshake path, so
+ * existing callers keep byte-identical outputs. The PSK-aware resumption path
+ * is added separately in `resumption.ts`; both reuse the same HKDF helpers.
  */
 import {
   AEAD_IV_BYTES,

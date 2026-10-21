@@ -13,7 +13,9 @@
     "verify:auth": "tsx scripts/phase-checks.ts auth",
     "verify:record": "tsx scripts/phase-checks.ts record",
     "verify:handshake": "tsx scripts/phase-checks.ts handshake",
-    "test:a11y": "playwright test"
+    "verify:resumption": "tsx scripts/phase-checks.ts resumption",
+    "test:a11y": "playwright test",
+    "test:mutations": "tsx scripts/mutations.ts"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

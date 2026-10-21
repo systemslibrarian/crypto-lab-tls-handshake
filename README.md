@@ -5,17 +5,37 @@
 
 ## What It Is
 
-A browser demo of a complete **TLS 1.3** (RFC 9846) handshake, run entirely in the
-page with no server. It uses genuine cryptographic primitives — **X25519** ephemeral
+A browser demo of a complete **TLS 1.3** (RFC 9846) full handshake and PSK resumption,
+run entirely in the page with no server. It uses genuine cryptographic primitives — **X25519** ephemeral
 key exchange, **Ed25519** certificate-chain and `CertificateVerify` signatures, the
 **HKDF** key schedule (`HKDF-Extract` / `HKDF-Expand-Label` / `Derive-Secret`), HMAC
 `Finished` MACs, and **AES-128-GCM** record protection. It surfaces the running
 **transcript hash** as a first-class value so you can see exactly what each signature and
-MAC is bound to. It is an honest educational simulation of the protocol's message flow and
-key schedule, not a hardened TLS stack:
-it implements the `(EC)DHE`-only full handshake and deliberately omits PSK/0-RTT,
-HelloRetryRequest, client authentication, X.509 encoding, and every name/validity/revocation
-check a real client performs. The page states those boundaries itself, in a Scope panel.
+MAC is bound to. The extension derives a ticket PSK, computes and verifies the truncated-
+ClientHello binder, compares `psk_dhe_ke` with the deliberately weak `psk_ke`, protects real
+0-RTT records, and lets you replay a bill payment against five server policies. It is an honest
+educational simulation, not a hardened TLS stack: it deliberately omits HelloRetryRequest,
+client authentication, X.509 encoding, and every name/validity/revocation check a real client
+performs. The page states those boundaries itself, in a Scope panel.
+
+## Exhibits
+
+1. **What TLS 1.3 Gives You** — confidentiality, integrity, authentication, and the message flow.
+2. **Interactive Handshake Simulator** — the eight-message 1-RTT trace and break-it-yourself faults.
+3. **Key Exchange** — both X25519 computations shown byte for byte.
+4. **Authentication** — the model chain, `CertificateVerify`, and three live MITM strategies.
+5. **Key Derivation & Forward Secrecy** — the no-PSK full-handshake schedule and one worked HKDF expansion.
+6. **Record Layer** — an AES-128-GCM application record and tamper rejection.
+7. **Resumption & 0-RTT** — ticket-to-PSK derivation, binder failure, STEK compromise, and replay policies.
+8. **TLS 1.3 vs 1.2 & Takeaways** — the protocol cleanup in context.
+9. **Scope** — what is faithful, compressed, or deliberately absent.
+
+## What Can Go Wrong
+
+- **0-RTT is replayable.** A valid ticket and binder authenticate the recorded first flight; they do not prove freshness. The broken policy executes the modelled bill payment twice.
+- **`psk_ke` has no fresh (EC)DHE input.** Leaking the STEK later recovers the ticket PSK and opens recorded resumed 1-RTT data. The default `psk_dhe_ke` keeps that 1-RTT data sealed, though its PSK-derived 0-RTT data is still exposed.
+- **A local replay cache is local.** ClientHello recording refuses a duplicate in region A while region B, sharing the STEK but not the recording store, accepts it.
+- **Freshness windows narrow risk; they do not remove it.** A late replay falls back to 1-RTT, while a replay delivered inside the tolerance can still execute.
 
 ## When to Use It
 
@@ -23,6 +43,7 @@ check a real client performs. The page states those boundaries itself, in a Scop
 - **Showing why authentication, not key exchange, stops a MITM** — the attack panel runs three different attacker strategies against the *current session's* real chain and real transcript, and shows which check each one trips: reusing the server's certificate fails the signature, signing with the attacker's own key fails the trust anchor, and relaying unchanged passes every check while gaining the attacker nothing.
 - **Explaining forward secrecy concretely** — the server's Ed25519 certificate key persists across sessions while the X25519 keys are generated per session and discarded, so you can press *New session* and watch the long-term key stay put while every derived secret changes.
 - **Walking the TLS 1.3 key schedule** — every secret in the RFC 9846 §7.1 tree is shown as the real HKDF output for the current session.
+- **Demonstrating the latency/security tradeoff in resumption** — record and replay the exact ClientHello + early-data bytes, then compare five computed admission policies.
 - **Do NOT use it as a TLS library.** It is an educational tool; JavaScript here is not constant-time and the chain validation is intentionally minimal. For production, use a vetted TLS implementation.
 
 ## Live Demo
@@ -64,11 +85,15 @@ the live HKDF tree plus an expandable **"show one derivation in full"** view —
 record-layer panel encrypts a real HTTP request with AES-128-GCM and proves tampering is
 rejected. Inline dotted-underline definitions cover ECDHE, AEAD, AAD, IV/nonce, and the
 transcript hash. Press **New session** for fresh ephemeral keys — the server's long-term
-leaf key stays the same. A closing **Scope** panel states in the page itself what is
+leaf key stays the same. A **Resumption &amp; 0-RTT** panel then issues an RFC-shaped
+NewSessionTicket, derives the PSK and binder, toggles both PSK establishment modes, and runs a
+recorded-wire STEK compromise. Its replay console counts payments from decrypted requests
+rather than attacker flags and compares five server policies. A closing **Scope** panel states
+in the page itself what is
 modelled faithfully and what is not: the certificate chain is not X.509 (so the
 `Certificate` step's byte count is this demo's encoding), no hostname/SAN, validity, or
-revocation check exists, PSK/0-RTT/HelloRetryRequest are omitted, nothing is negotiated,
-and only the application-data record is actually AEAD-sealed.
+revocation check exists, HelloRetryRequest and client authentication are omitted, nothing is negotiated,
+and only application-data records (including 0-RTT) are actually AEAD-sealed.
 
 ## How to Run Locally
 
@@ -83,8 +108,9 @@ Verification:
 
 ```bash
 npm run typecheck   # tsc strict, no emit
-npm test            # RFC 8448 HKDF vector + key schedule, auth/MITM, AEAD, end-to-end handshake gates
+npm test            # RFC 8448 full/resumed vectors + schedules, auth/MITM, AEAD, replay gates
 npm run build       # type-check + production bundle
+npm run test:a11y   # claims + WCAG A/AA drive, including the new panel at 320px
 ```
 
 `npm test` runs `scripts/phase-checks.ts`: the RFC 8448 `HKDF-Expand-Label`/Early-Secret
@@ -99,14 +125,16 @@ verification fails when the two sides derived from different ECDHE secrets, a ga
 "Break this handshake" fault asserting both which verdicts it must flip *and* which it must
 leave alone (the ECDHE fault must not disturb `CertificateVerify`; the in-flight byte flip
 must not disturb chain validation), and a source
-scan that rejects `Math.random`. The same gates
+scan that rejects `Math.random`. The resumption phase adds 13 published values from RFC 8448
+§§3–4 (resumption secret, PSK, binder derivation, early/handshake/main secrets, and the
+encrypted early record), plus a generated multi-block AEAD round-trip and every replay,
+fallback, and ticket-key-compromise outcome. The same gates
 gate the GitHub Pages deploy (`.github/workflows/deploy.yml`).
 
 ## Part of the Crypto-Lab Suite
 
-> One of 170+ live browser demos at
-> [systemslibrarian.github.io/crypto-lab](https://systemslibrarian.github.io/crypto-lab/)
-> — spanning Atbash (600 BCE) through NIST FIPS 203/204/205 (2024).
+Browse related teaching labs at
+[systemslibrarian.github.io/crypto-lab](https://systemslibrarian.github.io/crypto-lab/).
 
 Related: [pq-tls-handshake](https://systemslibrarian.github.io/crypto-lab-pq-tls-handshake/) ·
 [ssh-handshake](https://systemslibrarian.github.io/crypto-lab-ssh-handshake/) ·
