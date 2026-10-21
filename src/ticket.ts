@@ -81,8 +81,9 @@ export interface NewSessionTicket {
 
 function validateState(state: TicketState): void {
   if (state.psk.length !== 32) throw new Error('ticket PSK must be 32 bytes');
-  if (state.lifetimeSeconds < 0 || state.lifetimeSeconds > MAX_TICKET_LIFETIME_SECONDS) {
-    throw new Error(`ticket_lifetime must be between 0 and ${MAX_TICKET_LIFETIME_SECONDS} seconds`);
+  validateLifetime(state.lifetimeSeconds);
+  if (!Number.isSafeInteger(state.issuedAtMs) || state.issuedAtMs < 0) {
+    throw new Error('issuedAtMs must be a non-negative safe integer');
   }
   if (!Number.isInteger(state.ticketAgeAdd) || state.ticketAgeAdd < 0 || state.ticketAgeAdd > 0xffffffff) {
     throw new Error('ticket_age_add is invalid');
@@ -92,6 +93,12 @@ function validateState(state: TicketState): void {
   }
   const name = utf8(state.serverName);
   if (name.length === 0 || name.length > 0xffff) throw new Error('ticket server name is invalid');
+}
+
+function validateLifetime(seconds: number): void {
+  if (!Number.isInteger(seconds) || seconds < 0 || seconds > MAX_TICKET_LIFETIME_SECONDS) {
+    throw new Error(`ticket_lifetime must be between 0 and ${MAX_TICKET_LIFETIME_SECONDS} seconds`);
+  }
 }
 
 function encodeTicketState(state: TicketState): Uint8Array {
@@ -156,7 +163,7 @@ export async function openTicketState(stek: Uint8Array, opaqueTicket: Uint8Array
 
 /** Encode the RFC 9846 §4.7.1 fields, including the `early_data` extension. */
 export function serializeNewSessionTicket(fields: Omit<NewSessionTicket, 'wire'>): Uint8Array {
-  if (fields.ticketLifetime > MAX_TICKET_LIFETIME_SECONDS) throw new Error('ticket_lifetime exceeds seven days');
+  validateLifetime(fields.ticketLifetime);
   const earlyDataExtension = concatBytes(u16(EXT_EARLY_DATA), u16(4), u32(fields.maxEarlyDataSize));
   const body = concatBytes(
     u32(fields.ticketLifetime),
@@ -188,5 +195,5 @@ export function recoverTicketAge(obfuscatedAge: number, ticketAgeAdd: number): n
 }
 
 export function ticketIsExpired(state: TicketState, nowMs: number): boolean {
-  return nowMs - state.issuedAtMs > state.lifetimeSeconds * 1_000;
+  return nowMs - state.issuedAtMs >= state.lifetimeSeconds * 1_000;
 }

@@ -459,9 +459,13 @@ async function phaseResumption(): Promise<void> {
   const parsed = parsePskClientHello(lab.sessions.psk_dhe_ke.clientHello.full);
   assert(parsed.extensionOrder.at(-1) === 'pre_shared_key', 'pre_shared_key must be last');
   assert(parsed.truncated.length < parsed.full.length, 'binder transcript was not truncated');
-  assert((await runBinderProbe(lab, 'psk_dhe_ke', false)).valid, 'genuine binder must verify');
-  const flipped = await runBinderProbe(lab, 'psk_dhe_ke', true);
+  assert((await runBinderProbe(lab, 'psk_dhe_ke', 'genuine')).valid, 'genuine binder must verify');
+  const flipped = await runBinderProbe(lab, 'psk_dhe_ke', 'identity');
   assert(!flipped.valid && !flipped.earlyPlaintextReleased, 'changed identity must fail before early decrypt');
+  assert(flipped.field === 'pre_shared_key.identities[0]', 'changed opaque ticket must fail ticket AEAD before binder verification');
+  const badBinder = await runBinderProbe(lab, 'psk_dhe_ke', 'binder');
+  assert(badBinder.ticketValid && !badBinder.valid && !badBinder.earlyPlaintextReleased,
+    'changed binder must fail with an authentic ticket and no plaintext');
 
   const leak = await runStekLeak(lab);
   assert(leak.pskKe.binderValid && leak.pskKe.earlyDataReadable, 'STEK leak must recover PSK-only early data');
@@ -487,6 +491,10 @@ async function phaseResumption(): Promise<void> {
       scenario.regionA.executedPayments === scenario.regionA.log.filter((entry) => entry.executedPayment).length,
       `${configuration}: execution counter must equal the execution log`,
     );
+    assert(scenario.regionB.log.length === 1 && scenario.regionB.log[0]!.region === 'region B',
+      `${configuration}: region B must process its own replay`);
+    assert(scenario.regionB.executedPayments === (['no-anti-replay', 'clienthello-recording', 'freshness-window'].includes(configuration) ? 1 : 0),
+      `${configuration}: region B execution count is incorrect`);
     if (configuration === 'clienthello-recording') {
       assert(!scenario.replayA.accepted0Rtt && scenario.replayB.accepted0Rtt, 'recording must be region-local');
     }

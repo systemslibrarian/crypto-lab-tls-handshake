@@ -654,8 +654,24 @@ test('[verdict:binder-check] binder is independently re-derived from the PSK and
 
   await page.locator('#flipIdentityBtn').click();
   await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'false');
+  await expect(page.locator('[data-claim="binder"]')).toHaveAttribute('data-ticket-valid', 'false');
+  await expect(page.locator('.abort-field')).toContainText('pre_shared_key.identities[0]');
+  await expect(page.locator('.abort-field')).toContainText('Ticket AEAD rejected');
+  await expect(page.locator('[data-claim="binder"]')).toHaveAttribute('data-plaintext-released', 'false');
+  expect(await page.locator('[data-claim="binder"]').getAttribute('data-full-clienthello')).not.toBe(raw.full);
+  await page.locator('#flipIdentityBtn').click();
+  await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'true');
+
+  await page.locator('#flipBinderBtn').click();
+  await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'false');
+  await expect(page.locator('[data-claim="binder"]')).toHaveAttribute('data-ticket-valid', 'true');
   await expect(page.locator('.abort-field')).toContainText('pre_shared_key.binders[0]');
   await expect(page.locator('.abort-field')).toContainText('no early plaintext released');
+  await expect(page.locator('[data-claim="binder"]')).toHaveAttribute('data-plaintext-released', 'false');
+  await expect(page.locator('[data-claim="binder"]')).toHaveAttribute('data-truncated-clienthello', raw.truncated);
+  expect(await page.locator('[data-claim="binder"]').getAttribute('data-rendered-binder')).not.toBe(expectedBinder);
+  await page.locator('#flipBinderBtn').click();
+  await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'true');
 });
 
 test('resumption wire claims and protocol edges are computed, bounded, and internally consistent', async ({ page }) => {
@@ -665,7 +681,7 @@ test('resumption wire claims and protocol edges are computed, bounded, and inter
   const psk = (await page.locator('[data-claim="ticket-psk"] [data-psk]').getAttribute('data-psk')) ?? '';
   expect(psk).toMatch(/^[0-9a-f]{64}$/);
   await expect(page.locator('[data-claim="binder"]')).toContainText(
-    'supported_versions → key_share → early_data → psk_key_exchange_modes → pre_shared_key',
+    'supported_versions → supported_groups → signature_algorithms → key_share → early_data → psk_key_exchange_modes → pre_shared_key',
   );
   const edgeResults = await page.locator('[data-edge]').evaluateAll((rows) =>
     rows.map((row) => ({ edge: (row as HTMLElement).dataset.edge, ok: (row as HTMLElement).dataset.ok })),
@@ -709,11 +725,11 @@ test('[verdict:stek-psk-ke] [verdict:stek-psk-dhe] leaked STEK exposes exactly t
 });
 
 const REPLAY_EXPECTATIONS = [
-  { id: 'no-anti-replay', count: 2, ok: false, sameRegions: true, verdict: 'ALARM — EXECUTED TWICE' },
-  { id: 'single-use-ticket', count: 1, ok: true, sameRegions: true, verdict: 'REPLAY REFUSED — TICKET ALREADY USED' },
-  { id: 'clienthello-recording', count: 1, ok: false, sameRegions: false, verdict: 'ALARM — REGION B EXECUTED' },
-  { id: 'freshness-window', count: 2, ok: false, sameRegions: true, verdict: 'ALARM — INSIDE WINDOW EXECUTED TWICE' },
-  { id: 'ignore-0rtt', count: 1, ok: true, sameRegions: true, verdict: 'REPLAY REFUSED — 1-RTT BINDS SERVER NONCE' },
+  { id: 'no-anti-replay', count: 2, countB: 1, ok: false, verdict: 'ALARM — EXECUTED TWICE' },
+  { id: 'single-use-ticket', count: 1, countB: 0, ok: true, verdict: 'REPLAY REFUSED — TICKET ALREADY USED' },
+  { id: 'clienthello-recording', count: 1, countB: 1, ok: false, verdict: 'ALARM — REGION B EXECUTED' },
+  { id: 'freshness-window', count: 2, countB: 1, ok: false, verdict: 'ALARM — INSIDE WINDOW EXECUTED TWICE' },
+  { id: 'ignore-0rtt', count: 1, countB: 0, ok: true, verdict: 'REPLAY REFUSED — 1-RTT BINDS SERVER NONCE' },
 ] as const;
 
 for (const expected of REPLAY_EXPECTATIONS) {
@@ -724,6 +740,7 @@ for (const expected of REPLAY_EXPECTATIONS) {
       rows: [...tile.querySelectorAll('.arrival-log li')].map((row) => ({
         arrival: (row as HTMLElement).dataset.arrival,
         executed: (row as HTMLElement).dataset.executed === 'true',
+        region: (row as HTMLElement).dataset.serverRegion,
         reason: row.textContent?.replace(/\s+/g, ' ').trim(),
       })),
     })));
@@ -732,8 +749,10 @@ for (const expected of REPLAY_EXPECTATIONS) {
       expect(region.count).toBe(region.rows.filter((row) => row.executed).length);
     }
     expect(regions[0]!.count).toBe(expected.count);
-    expect(regions[0]).toEqual(expected.sameRegions ? regions[1] : expect.not.objectContaining(regions[1]!));
-    if (!expected.sameRegions) expect(regions[0]).not.toEqual(regions[1]);
+    expect(regions[1]!.count).toBe(expected.countB);
+    expect(regions[0]!.rows.every((row) => row.region === 'region A')).toBe(true);
+    expect(regions[1]!.rows).toHaveLength(1);
+    expect(regions[1]!.rows[0]).toMatchObject({ arrival: 'replay', region: 'region B' });
     const marker = page.locator(`[data-verdict="replay-${expected.id}"]`);
     await expect(marker).toHaveAttribute('data-ok', String(expected.ok));
     await expect(marker).toContainText(expected.verdict);
@@ -745,6 +764,33 @@ test('[verdict:one-rtt-fallback] freshness rejection preserves a computed 1-RTT 
   await expect(edge).toHaveAttribute('data-ok', 'true');
   await expect(edge).toContainText('reject 0-RTT, proceed with 1-RTT');
   await expect(page.locator('[data-verdict="one-rtt-fallback"]')).toHaveAttribute('data-ok', 'true');
+});
+
+test('[verdict:handshake-gate] failed full handshakes retire tickets and block resumption until a new honest session', async ({ page }) => {
+  for (const fault of ['ecdhe', 'transcript']) {
+    await expect(page.locator('#resumption')).toHaveAttribute('data-available', 'true');
+    await page.locator('#leakStekBtn').click();
+    await expect(page.locator('.leak-results')).toBeVisible();
+    await page.locator(`.fault-buttons [data-fault="${fault}"]`).click();
+    await expect(page.locator('.fault-panel')).toHaveClass(/faulted/);
+    await expect(page.locator('#resumption')).toHaveAttribute('data-available', 'false');
+    await expect(page.locator('#resumption')).toContainText('No usable ticket or resumption PSK was issued');
+    await expect(page.locator('[data-ticket-wire], [data-psk], #recordEarlyBtn, .leak-results')).toHaveCount(0);
+    await page.locator('.fault-buttons [data-fault="none"]').click();
+    await expect(page.locator('#resumption')).toHaveAttribute('data-available', 'true');
+    await expect(page.locator('[data-ticket-wire]')).toHaveCount(1);
+  }
+});
+
+test('[verdict:region-routing] recording the original processes region A only', async ({ page }) => {
+  await page.locator('#recordEarlyBtn').click();
+  await expect(page.locator('[data-region="A"] .payment-count')).toHaveAttribute('data-count', '1');
+  await expect(page.locator('[data-region="A"] [data-arrival="original"]')).toHaveCount(1);
+  await expect(page.locator('[data-region="B"] .payment-count')).toHaveAttribute('data-count', '0');
+  await expect(page.locator('[data-region="B"] [data-arrival]')).toHaveCount(0);
+  await page.locator('#replayEarlyBtn').click();
+  await expect(page.locator('[data-region="B"] [data-arrival="replay"]')).toHaveAttribute('data-server-region', 'region B');
+  await expect(page.locator('[data-region="B"] .payment-count')).toHaveAttribute('data-count', '0');
 });
 
 test('negative claim: authenticated 0-RTT can still execute twice', async ({ page }) => {

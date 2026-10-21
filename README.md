@@ -35,7 +35,9 @@ performs. The page states those boundaries itself, in a Scope panel.
 - **0-RTT is replayable.** A valid ticket and binder authenticate the recorded first flight; they do not prove freshness. The broken policy executes the modelled bill payment twice.
 - **`psk_ke` has no fresh (EC)DHE input.** Leaking the STEK later recovers the ticket PSK and opens recorded resumed 1-RTT data. The default `psk_dhe_ke` keeps that 1-RTT data sealed, though its PSK-derived 0-RTT data is still exposed.
 - **A local replay cache is local.** ClientHello recording refuses a duplicate in region A while region B, sharing the STEK but not the recording store, accepts it.
-- **Freshness windows narrow risk; they do not remove it.** A late replay falls back to 1-RTT, while a replay delivered inside the tolerance can still execute.
+- **Every ticket-based early-data policy checks ticket age.** Single-use tickets and ClientHello recording add duplicate tracking. Freshness alone rejects late copies but permits replays inside the tolerance.
+- **Failed full handshakes cannot establish resumption.** A failed chain, signature, Finished check, or shared-secret agreement prevents ticket issuance and retires the resumption panel's previous results.
+- **Ticket authentication precedes binder verification.** Flipping opaque ticket bytes fails ticket AEAD; flipping only the binder fails the binder check. Neither failure releases early plaintext.
 
 ## When to Use It
 
@@ -87,8 +89,11 @@ rejected. Inline dotted-underline definitions cover ECDHE, AEAD, AAD, IV/nonce, 
 transcript hash. Press **New session** for fresh ephemeral keys — the server's long-term
 leaf key stays the same. A **Resumption &amp; 0-RTT** panel then issues an RFC-shaped
 NewSessionTicket, derives the PSK and binder, toggles both PSK establishment modes, and runs a
-recorded-wire STEK compromise. Its replay console counts payments from decrypted requests
-rather than attacker flags and compares five server policies. A closing **Scope** panel states
+recorded-wire STEK compromise. The resumption ClientHello advertises X25519 in `supported_groups`
+and Ed25519 for certificate fallback, with `pre_shared_key` last. Its replay console processes the
+original only in region A, then one replay in each region; each region displays its own admission
+log and payment count. Certificate handshakes and `psk_dhe_ke` provide forward secrecy through
+fresh (EC)DHE; `psk_ke` and 0-RTT do not. A closing **Scope** panel states
 in the page itself what is
 modelled faithfully and what is not: the certificate chain is not X.509 (so the
 `Certificate` step's byte count is this demo's encoding), no hostname/SAN, validity, or
@@ -111,6 +116,7 @@ npm run typecheck   # tsc strict, no emit
 npm test            # RFC 8448 full/resumed vectors + schedules, auth/MITM, AEAD, replay gates
 npm run build       # type-check + production bundle
 npm run test:a11y   # claims + WCAG A/AA drive, including the new panel at 320px
+npm run test:mutations # 14 replayable behavioural mutations; requires a clean committed tree
 ```
 
 `npm test` runs `scripts/phase-checks.ts`: the RFC 8448 `HKDF-Expand-Label`/Early-Secret
@@ -129,7 +135,16 @@ scan that rejects `Math.random`. The resumption phase adds 13 published values f
 §§3–4 (resumption secret, PSK, binder derivation, early/handshake/main secrets, and the
 encrypted early record), plus a generated multi-block AEAD round-trip and every replay,
 fallback, and ticket-key-compromise outcome. The same gates
-gate the GitHub Pages deploy (`.github/workflows/deploy.yml`).
+gate the GitHub Pages deploy (`.github/workflows/deploy.yml`). The protocol regressions also check
+stale first arrivals under all five policies, zero-lifetime and exact-deadline expiry, invalid
+lifetime encodings, missing/mismatched groups, and each failed full-handshake precondition.
+
+The mutation ledger in `scripts/mutation-ledger.json` changes binder admission, replay stores,
+freshness enforcement, PSK/DHE derivation, fallback, handshake eligibility, group advertisement,
+expiry, and regional results. For each entry the runner proves baseline green, a non-empty source
+diff, a successful build with a changed JavaScript bundle hash, failure of the single named owning
+assertion, and restored source/hash/test success. Compilation, startup, navigation, skipped tests,
+and test timeouts cannot count as kills. This gate runs before the Pages artifact is uploaded.
 
 ## Part of the Crypto-Lab Suite
 

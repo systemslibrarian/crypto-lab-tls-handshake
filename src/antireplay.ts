@@ -22,7 +22,7 @@ export const REPLAY_CONFIGURATIONS: readonly {
 }[] = [
   { id: 'single-use-ticket', label: 'Single-use ticket' },
   { id: 'clienthello-recording', label: 'ClientHello recording' },
-  { id: 'freshness-window', label: 'Freshness window' },
+  { id: 'freshness-window', label: 'Freshness only (no duplicate tracking)' },
   { id: 'ignore-0rtt', label: 'Ignore 0-RTT' },
   { id: 'no-anti-replay', label: 'No anti-replay', broken: true },
 ];
@@ -142,7 +142,9 @@ export class EarlyDataServer {
       return this.record(arrival, { ...base, reason: 'max_early_data_size exceeded' });
     }
 
-    if (this.configuration === 'freshness-window') {
+    // Ticket-age validation is required for every ticket-based 0-RTT policy.
+    // Duplicate tracking is an additional defence, not a replacement for it.
+    {
       const clientAge = recoverTicketAge(hello.obfuscatedTicketAge, ticket.ticketAgeAdd);
       const serverAge = Math.max(0, arrivalTimeMs - ticket.issuedAtMs);
       if (Math.abs(clientAge - serverAge) > this.freshnessToleranceMs) {
@@ -184,7 +186,9 @@ export class EarlyDataServer {
 
     if (this.configuration === 'no-anti-replay') {
       // The intentionally unsafe decision lives in src/broken/no-anti-replay.ts.
-      acceptWithoutReplayProtection();
+      if (!acceptWithoutReplayProtection()) {
+        return this.record(arrival, { ...base, oneRttFallback: true, reason: 'early data disabled' });
+      }
     }
 
     let plaintext: Uint8Array;

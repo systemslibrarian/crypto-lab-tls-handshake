@@ -22,6 +22,8 @@ const TLS_AES_128_GCM_SHA256 = 0x1301;
 const X25519 = 0x001d;
 
 const EXT_SUPPORTED_VERSIONS = 0x002b;
+const EXT_SUPPORTED_GROUPS = 0x000a;
+const EXT_SIGNATURE_ALGORITHMS = 0x000d;
 const EXT_KEY_SHARE = 0x0033;
 const EXT_EARLY_DATA = 0x002a;
 const EXT_PSK_MODES = 0x002d;
@@ -88,6 +90,9 @@ export function serializePskClientHello(input: PskClientHelloInput): PskClientHe
   if (input.binder.length !== BINDER_BYTES) throw new Error(`PSK binder must be ${BINDER_BYTES} bytes`);
 
   const supportedVersions = extension(EXT_SUPPORTED_VERSIONS, vec(u16(TLS13), 1));
+  const supportedGroups = extension(EXT_SUPPORTED_GROUPS, vec(u16(X25519), 2));
+  // Ed25519 also permits the full certificate handshake if the PSK is declined.
+  const signatureAlgorithms = extension(EXT_SIGNATURE_ALGORITHMS, vec(u16(0x0807), 2));
   const keyShareEntry = concatBytes(u16(X25519), vec(input.keyShare, 2));
   const keyShare = extension(EXT_KEY_SHARE, vec(keyShareEntry, 2));
   const earlyData = extension(EXT_EARLY_DATA, new Uint8Array());
@@ -106,7 +111,7 @@ export function serializePskClientHello(input: PskClientHelloInput): PskClientHe
     vec(u16(TLS_AES_128_GCM_SHA256), 2),
     vec(new Uint8Array([0]), 1),
   );
-  const earlierExtensions = concatBytes(supportedVersions, keyShare, earlyData, pskModes);
+  const earlierExtensions = concatBytes(supportedVersions, supportedGroups, signatureAlgorithms, keyShare, earlyData, pskModes);
   const extensionsLength = earlierExtensions.length + pskHeader.length + pskDataLength;
 
   // The outer lengths describe the final ClientHello even though `truncated`
@@ -132,7 +137,7 @@ export function serializePskClientHello(input: PskClientHelloInput): PskClientHe
     obfuscatedTicketAge: input.obfuscatedTicketAge >>> 0,
     binder: Uint8Array.from(input.binder),
     mode: input.mode,
-    extensionOrder: ['supported_versions', 'key_share', 'early_data', 'psk_key_exchange_modes', 'pre_shared_key'],
+    extensionOrder: ['supported_versions', 'supported_groups', 'signature_algorithms', 'key_share', 'early_data', 'psk_key_exchange_modes', 'pre_shared_key'],
   };
 }
 
@@ -173,6 +178,8 @@ class Reader {
 
 const EXTENSION_NAMES: Record<number, string> = {
   [EXT_SUPPORTED_VERSIONS]: 'supported_versions',
+  [EXT_SUPPORTED_GROUPS]: 'supported_groups',
+  [EXT_SIGNATURE_ALGORITHMS]: 'signature_algorithms',
   [EXT_KEY_SHARE]: 'key_share',
   [EXT_EARLY_DATA]: 'early_data',
   [EXT_PSK_MODES]: 'psk_key_exchange_modes',
@@ -201,6 +208,8 @@ export function parsePskClientHello(full: Uint8Array): PskClientHello {
   let binder: Uint8Array | null = null;
   let truncatedEnd = -1;
   let mode: PskMode | null = null;
+  let advertisedGroup = -1;
+  let shareGroup = -1;
 
   while (r.offset < extensionsEnd) {
     const type = r.u16('extension type');
@@ -210,7 +219,23 @@ export function parsePskClientHello(full: Uint8Array): PskClientHello {
     if (dataEnd > extensionsEnd) throw new Error('extension exceeds ClientHello');
     order.push(EXTENSION_NAMES[type] ?? `0x${type.toString(16).padStart(4, '0')}`);
 
-    if (type === EXT_PSK_MODES) {
+    if (type === EXT_SUPPORTED_VERSIONS) {
+      if (r.byte('versions length') !== 2 || r.u16('version') !== TLS13) throw new Error('unsupported TLS version');
+    } else if (type === EXT_SUPPORTED_GROUPS) {
+      if (r.u16('groups length') !== 2) throw new Error('this demo expects one supported group');
+      advertisedGroup = r.u16('supported group');
+    } else if (type === EXT_SIGNATURE_ALGORITHMS) {
+      if (r.u16('signature algorithms length') !== 2 || r.u16('signature algorithm') !== 0x0807) {
+        throw new Error('this demo expects Ed25519');
+      }
+    } else if (type === EXT_KEY_SHARE) {
+      if (r.u16('client shares length') !== 36) throw new Error('invalid X25519 shares vector');
+      shareGroup = r.u16('key share group');
+      if (r.u16('key exchange length') !== 32) throw new Error('invalid X25519 key share');
+      r.take(32, 'X25519 key share');
+    } else if (type === EXT_EARLY_DATA) {
+      if (length !== 0) throw new Error('ClientHello early_data must be empty');
+    } else if (type === EXT_PSK_MODES) {
       const modesLength = r.byte('psk modes length');
       const modes = r.take(modesLength, 'psk modes');
       if (modes.length !== 1 || (modes[0] !== 0 && modes[0] !== 1)) throw new Error('unsupported PSK mode');
@@ -237,8 +262,9 @@ export function parsePskClientHello(full: Uint8Array): PskClientHello {
     if (r.offset !== dataEnd) throw new Error('extension length mismatch');
   }
 
-  const expected = ['supported_versions', 'key_share', 'early_data', 'psk_key_exchange_modes', 'pre_shared_key'];
+  const expected = ['supported_versions', 'supported_groups', 'signature_algorithms', 'key_share', 'early_data', 'psk_key_exchange_modes', 'pre_shared_key'];
   if (order.join(',') !== expected.join(',')) throw new Error(`unexpected ClientHello extensions: ${order.join(', ')}`);
+  if (advertisedGroup !== X25519 || shareGroup !== advertisedGroup) throw new Error('key_share group was not advertised in supported_groups');
   if (!identity || !binder || !mode || truncatedEnd < 0 || identityOffset < 0) throw new Error('incomplete PSK ClientHello');
 
   return {
@@ -264,5 +290,13 @@ export function flipOfferedIdentity(full: Uint8Array, byteIndex = 0): Uint8Array
   if (at < 0) throw new Error('identity not found in ClientHello');
   const out = Uint8Array.from(full);
   out[(at / 2) + byteIndex] ^= 0x01;
+  return out;
+}
+
+/** Change only the binder, preserving the authenticated ticket and its age. */
+export function flipPskBinder(full: Uint8Array): Uint8Array {
+  parsePskClientHello(full);
+  const out = Uint8Array.from(full);
+  out[out.length - 1] ^= 0x01;
   return out;
 }

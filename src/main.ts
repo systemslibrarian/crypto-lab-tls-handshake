@@ -16,6 +16,7 @@ import { toHex } from './primitives';
 import {
   DEFAULT_PSK_MODE,
   DEFAULT_REPLAY_MODE,
+  ResumptionUnavailableError,
   createResumptionLab,
   runBinderProbe,
   runEdgeCases,
@@ -42,10 +43,10 @@ interface State {
   autoTimer: number | null;
   /** +1 when the last navigation moved forward (fly the packet); 0 = no fly. */
   flyDelta: number;
-  resumption: ResumptionLab;
+  resumption: ResumptionLab | null;
   pskMode: PskMode;
-  binderProbe: BinderProbe;
-  edgeCases: EdgeCases;
+  binderProbe: BinderProbe | null;
+  edgeCases: EdgeCases | null;
   leak: LeakComparison | null;
   replayConfiguration: ReplayConfiguration;
   replayStage: 'idle' | 'recorded' | 'replayed';
@@ -64,7 +65,7 @@ const state: State = {
   flyDelta: 0,
   resumption: initialResumption,
   pskMode: DEFAULT_PSK_MODE,
-  binderProbe: await runBinderProbe(initialResumption, DEFAULT_PSK_MODE, false),
+  binderProbe: await runBinderProbe(initialResumption, DEFAULT_PSK_MODE, 'genuine'),
   edgeCases: await runEdgeCases(initialResumption),
   leak: null,
   replayConfiguration: DEFAULT_REPLAY_MODE,
@@ -514,9 +515,17 @@ function recordSection(t: HandshakeTrace): string {
 
 function resumptionSection(): string {
   const lab = state.resumption;
+  const probe = state.binderProbe;
+  const edges = state.edgeCases;
+  if (!lab || !probe || !edges) {
+    return `<section class="panel resumption-panel" id="resumption" data-resumption-marker="resumption-0rtt-replay-v1" data-available="false">
+      <h2><span class="section-num">7</span> Resumption &amp; 0-RTT</h2>
+      <p class="lead">Resumption unavailable: the full handshake failed authentication or Finished verification.
+        No usable ticket or resumption PSK was issued. Select <strong>Honest session</strong> above to establish a new session.</p>
+    </section>`;
+  }
   const session = lab.sessions[state.pskMode];
   const ticket = lab.issued.ticket;
-  const probe = state.binderProbe;
   const replay = state.replay;
   const replayVisible = replay && state.replayStage === 'replayed';
   const visibleLog = (region: 'regionA' | 'regionB') => {
@@ -527,7 +536,7 @@ function resumptionSection(): string {
   const count = (region: 'regionA' | 'regionB') => visibleLog(region).filter((entry) => entry.executedPayment).length;
   const logRows = (region: 'regionA' | 'regionB'): string => visibleLog(region)
     .map((entry) => `<li data-arrival="${entry.arrival}" data-executed="${entry.executedPayment}" data-ticket-valid="${entry.ticketValid}"
-        data-binder-valid="${entry.binderValid}" data-decrypted="${entry.earlyDataDecrypted}">
+        data-binder-valid="${entry.binderValid}" data-decrypted="${entry.earlyDataDecrypted}" data-server-region="${esc(entry.region)}">
         <strong>${entry.arrival === 'original' ? 'original' : 'replay'}</strong> — ${esc(entry.reason)}
         ${entry.executedPayment ? '<span class="execution">EXECUTED</span>' : '<span>not executed</span>'}
       </li>`).join('') || '<li>No arrival processed yet.</li>';
@@ -538,7 +547,8 @@ function resumptionSection(): string {
   const scheduleRow = (name: string, value: Uint8Array): string =>
     `<div class="kstage"><span class="tag">Derive</span><span class="name">${esc(name)}</span><span class="val">${esc(shortHex(value))}</span></div>`;
   const leak = state.leak;
-  const negativeFixture = replayVisible && replay.configuration === 'no-anti-replay'
+  const negativeFixture = replayVisible && replay.configuration === 'no-anti-replay' &&
+      [replay.first, replay.replayA].every((entry) => entry.ticketValid && entry.binderValid && entry.earlyDataDecrypted && entry.executedPayment)
     ? `<div class="negative-fixture" data-claim="0rtt-negative">
         <div class="evidence-checks" role="group" aria-label="Authentication evidence">
           <span class="evidence-check good" data-check="ticket">✓ ticket VALID</span>
@@ -551,7 +561,7 @@ function resumptionSection(): string {
     : '';
 
   return `
-  <section class="panel resumption-panel" id="resumption" data-resumption-marker="resumption-0rtt-replay-v1">
+  <section class="panel resumption-panel" id="resumption" data-resumption-marker="resumption-0rtt-replay-v1" data-available="true">
     <h2><span class="section-num">7</span> Resumption &amp; 0-RTT</h2>
     <p class="lead">After a full handshake the server can hand the client a ticket. Next time, the client can skip the
       certificate check — and can even send data in its very first message. That first-message data is fast, and it can
@@ -570,7 +580,7 @@ function resumptionSection(): string {
         <div><span class="term" tabindex="0" role="note" aria-label="Largest early application-data payload this ticket permits.">early_data.max_early_data_size</span><output>${ticket.maxEarlyDataSize} B</output></div>
       </div>
       <div class="derive-line" data-claim="ticket-psk">
-        <code>Derive-Secret(Main Secret, "res master", Hash(CH..client Finished))</code>
+        <code>Derive-Secret(Main Secret, "res master", CH..client Finished)</code>
         <span aria-hidden="true">↓</span>
         <code>HKDF-Expand-Label(resumption secret, "resumption", ticket_nonce, 32)</code>
         <output class="scroll-value" tabindex="0" data-psk="${toHex(lab.issued.psk)}">PSK ${toHex(lab.issued.psk)}</output>
@@ -600,16 +610,19 @@ function resumptionSection(): string {
         ${scheduleRow('server application traffic', session.schedule.serverApplicationTrafficSecret)}
       </div>
       <div class="binder-work" data-claim="binder" data-psk="${toHex(lab.issued.psk)}"
-        data-truncated-clienthello="${session.clientHello.truncatedHex}" data-full-clienthello="${session.clientHello.fullHex}"
-        data-rendered-binder="${toHex(session.clientHello.binder)}">
-        <p><strong>Extension order:</strong> <code>${session.clientHello.extensionOrder.join(' → ')}</code></p>
-        <p><strong>Binder transcript:</strong> ${session.clientHello.truncated.length} B truncated / ${session.clientHello.full.length} B full; enclosing lengths already describe the full message.</p>
-        <p class="mono">binder = HMAC(finished_key, SHA-256(truncated ClientHello)) = <span class="hl">${toHex(session.clientHello.binder)}</span></p>
+        data-truncated-clienthello="${probe.clientHello.truncatedHex}" data-full-clienthello="${probe.clientHello.fullHex}"
+        data-rendered-binder="${toHex(probe.clientHello.binder)}" data-probe="${probe.kind}" data-ticket-valid="${probe.ticketValid}" data-plaintext-released="${probe.earlyPlaintextReleased}">
+        <p><strong>Extension order:</strong> <code>${probe.clientHello.extensionOrder.join(' → ')}</code></p>
+        <p><strong>Binder transcript:</strong> ${probe.clientHello.truncated.length} B truncated / ${probe.clientHello.full.length} B full; enclosing lengths already describe the full message.</p>
+        <p class="mono">Offered binder (expected: HMAC(finished_key, SHA-256(truncated ClientHello))) = <span class="hl">${toHex(probe.clientHello.binder)}</span></p>
         <div class="verdicts">
-          ${markedPill(probe.valid, probe.valid ? 'binder VALID' : 'binder INVALID', 'binder-check', true)}
+          ${markedPill(probe.valid, probe.valid ? 'binder VALID' : probe.ticketValid ? 'binder INVALID' : 'ticket INVALID — binder not checked', 'binder-check', true)}
         </div>
-        <p class="abort-field">${probe.valid ? 'Server may now consider early_data.' : `ABORT FIELD: ${esc(probe.field)} — no early plaintext released.`}</p>
-        <button class="btn" id="flipIdentityBtn">${probe.valid ? 'Flip one identity byte' : 'Restore genuine identity'}</button>
+        <p class="abort-field">${probe.valid ? 'Server may now consider early_data.' : `REJECT FIELD: ${esc(probe.field)} — no early plaintext released.${probe.ticketValid ? '' : ' Ticket AEAD rejected; fall back to a full handshake.'}`}</p>
+        <div class="controls">
+          <button class="btn" id="flipIdentityBtn">${probe.kind === 'identity' ? 'Restore genuine identity' : 'Flip one identity byte'}</button>
+          <button class="btn" id="flipBinderBtn">${probe.kind === 'binder' ? 'Restore genuine binder' : 'Flip one binder byte'}</button>
+        </div>
       </div>
     </div>
 
@@ -657,8 +670,9 @@ function resumptionSection(): string {
       <div class="verdicts">${replayVerdict}</div>
       ${negativeFixture}
       <p class="lead replay-explainer">Single-use tickets share a used-ticket set here. ClientHello recording is
-        deliberately local, so region B can accept the same bytes. A freshness window rejects late copies but cannot
-        stop a copy sent inside the window. Ignoring 0-RTT moves execution behind the handshake, whose fresh server
+        deliberately local, so region B can accept the same bytes. Every policy checks ticket age before admitting
+        early data. Freshness alone cannot stop a copy sent inside the window. The original goes only to region A;
+        replay sends one copy to A and one to B. Ignoring 0-RTT moves execution behind the handshake, whose fresh server
         nonce changes the 1-RTT key.</p>
       <p class="lead">Another replay use is observational: repeating a balance query and watching response lengths can
         leak changes even when the attacker cannot read the response. RFC 9846 Appendix F.5 discusses these replay
@@ -667,13 +681,13 @@ function resumptionSection(): string {
 
     <div class="act edge-cases" data-claim="edge-cases">
       <h3>Protocol edges</h3>
-      <div class="verdicts">${markedPill(state.edgeCases.freshnessFallback.oneRttFallback, '1-RTT FALLBACK AVAILABLE', 'one-rtt-fallback', true)}</div>
+      <div class="verdicts">${markedPill(edges.freshnessFallback.oneRttFallback, '1-RTT FALLBACK AVAILABLE', 'one-rtt-fallback', true)}</div>
       <ul>
-        <li data-edge="expired" data-ok="${state.edgeCases.expiredTicket.oneRttFallback}">Expired ticket → full handshake: ${esc(state.edgeCases.expiredTicket.reason)}</li>
-        <li data-edge="tampered" data-ok="${state.edgeCases.tamperedTicket.oneRttFallback}">Tampered ticket AEAD → full handshake: ${esc(state.edgeCases.tamperedTicket.reason)}</li>
-        <li data-edge="untruncated" data-ok="${!state.edgeCases.untruncatedBinderValid}">Binder over the untruncated ClientHello → mismatch (the binder bytes must be excluded).</li>
-        <li data-edge="mode" data-ok="${state.edgeCases.pskKeRejectedByDheOnlyServer}"><code>psk_ke</code> offered to a DHE-only server → full handshake.</li>
-        <li data-edge="freshness" data-ok="${state.edgeCases.freshnessFallback.oneRttFallback}">Age outside tolerance → reject 0-RTT, proceed with 1-RTT.</li>
+        <li data-edge="expired" data-ok="${edges.expiredTicket.oneRttFallback}">Expired ticket → full handshake: ${esc(edges.expiredTicket.reason)}</li>
+        <li data-edge="tampered" data-ok="${edges.tamperedTicket.oneRttFallback}">Tampered ticket AEAD → full handshake: ${esc(edges.tamperedTicket.reason)}</li>
+        <li data-edge="untruncated" data-ok="${!edges.untruncatedBinderValid}">Binder over the untruncated ClientHello → mismatch (the binder bytes must be excluded).</li>
+        <li data-edge="mode" data-ok="${edges.pskKeRejectedByDheOnlyServer}"><code>psk_ke</code> offered to a DHE-only server → full handshake.</li>
+        <li data-edge="freshness" data-ok="${edges.freshnessFallback.oneRttFallback}">Age outside tolerance → reject 0-RTT, proceed with 1-RTT.</li>
       </ul>
     </div>
     <p class="sources lead"><strong>Primary sources:</strong>
@@ -692,7 +706,7 @@ function comparisonSection(): string {
       <thead><tr><th>Property</th><th>TLS 1.2</th><th>TLS 1.3</th></tr></thead>
       <tbody>
         <tr><td>Handshake round trips</td><td class="no">2-RTT</td><td class="yes">1-RTT (0-RTT optional)</td></tr>
-        <tr><td>Forward secrecy</td><td class="no">Optional (often RSA key transport)</td><td class="yes">Mandatory (ephemeral (EC)DHE)</td></tr>
+        <tr><td>Forward secrecy</td><td class="no">Optional (often RSA key transport)</td><td class="yes">Certificate handshakes and psk_dhe_ke use (EC)DHE; psk_ke and 0-RTT lack forward secrecy</td></tr>
         <tr><td>Cipher negotiation</td><td class="no">Huge legacy menu (RC4, CBC, export)</td><td class="yes">5 AEAD suites, no legacy</td></tr>
         <tr><td>Handshake encryption</td><td class="no">Mostly in the clear</td><td class="yes">Encrypted after ServerHello</td></tr>
         <tr><td>Key derivation</td><td class="no">Custom PRF</td><td class="yes">HKDF, clearly specified schedule</td></tr>
@@ -700,7 +714,7 @@ function comparisonSection(): string {
     </table>
     <ul class="takeaways">
       <li><strong>Key exchange ≠ authentication.</strong> ECDHE gives you a shared secret with <em>someone</em>; signatures prove it's the right someone.</li>
-      <li><strong>Forward secrecy is structural,</strong> not a setting — it comes from throwing away ephemeral keys.</li>
+      <li><strong>Forward secrecy comes from ephemeral key agreement.</strong> Use fresh (EC)DHE and discard its private keys. PSK-only mode and 0-RTT do not provide this protection.</li>
       <li><strong>Common real-world failures:</strong> trusting an unvalidated certificate, accepting downgrades to TLS 1.2/1.0, expired or misissued certs, and missing SNI/hostname checks.</li>
     </ul>
   </section>`;
@@ -840,12 +854,17 @@ function go(step: number): void {
 }
 
 async function replaceTrace(trace: HandshakeTrace): Promise<void> {
-  const resumption = await createResumptionLab(trace);
+  let resumption: ResumptionLab | null = null;
+  try {
+    resumption = await createResumptionLab(trace);
+  } catch (error) {
+    if (!(error instanceof ResumptionUnavailableError)) throw error;
+  }
   state.trace = trace;
   state.resumption = resumption;
   state.pskMode = DEFAULT_PSK_MODE;
-  state.binderProbe = await runBinderProbe(resumption, DEFAULT_PSK_MODE, false);
-  state.edgeCases = await runEdgeCases(resumption);
+  state.binderProbe = resumption ? await runBinderProbe(resumption, DEFAULT_PSK_MODE, 'genuine') : null;
+  state.edgeCases = resumption ? await runEdgeCases(resumption) : null;
   state.leak = null;
   state.replayConfiguration = DEFAULT_REPLAY_MODE;
   state.replayStage = 'idle';
@@ -918,11 +937,12 @@ function wire(): void {
   document.querySelectorAll<HTMLButtonElement>('[data-psk-mode]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const next = btn.dataset.pskMode as PskMode;
+      if (!state.resumption) return;
       // A same-value click is a genuine no-op: it must not retire fresh proof.
       if (next === state.pskMode) return;
       state.pskMode = next;
       state.retiredVerdicts += 1;
-      state.binderProbe = await runBinderProbe(state.resumption, next, false);
+      state.binderProbe = await runBinderProbe(state.resumption, next, 'genuine');
       state.leak = null;
       state.replayStage = 'idle';
       state.replay = null;
@@ -930,10 +950,17 @@ function wire(): void {
     });
   });
   document.querySelector('#flipIdentityBtn')?.addEventListener('click', async () => {
-    state.binderProbe = await runBinderProbe(state.resumption, state.pskMode, state.binderProbe.valid);
+    if (!state.resumption || !state.binderProbe) return;
+    state.binderProbe = await runBinderProbe(state.resumption, state.pskMode, state.binderProbe.kind === 'identity' ? 'genuine' : 'identity');
+    render();
+  });
+  document.querySelector('#flipBinderBtn')?.addEventListener('click', async () => {
+    if (!state.resumption || !state.binderProbe) return;
+    state.binderProbe = await runBinderProbe(state.resumption, state.pskMode, state.binderProbe.kind === 'binder' ? 'genuine' : 'binder');
     render();
   });
   document.querySelector('#leakStekBtn')?.addEventListener('click', async () => {
+    if (!state.resumption) return;
     state.leak = await runStekLeak(state.resumption);
     render();
   });
@@ -946,6 +973,7 @@ function wire(): void {
     render();
   });
   document.querySelector('#recordEarlyBtn')?.addEventListener('click', async () => {
+    if (!state.resumption) return;
     state.replay = await runReplayScenario(state.resumption, state.replayConfiguration);
     state.replayStage = 'recorded';
     render();

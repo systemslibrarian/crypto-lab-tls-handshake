@@ -580,8 +580,15 @@ export async function driveAllStates(page: Page, theme: string): Promise<void> {
   // Resumption's dynamically revealed results are part of the same a11y gate.
   await page.locator('#flipIdentityBtn').click();
   await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'false');
-  await scanAt('resumption binder mismatch');
+  await expect(page.locator('.abort-field')).toContainText('pre_shared_key.identities[0]');
+  await scanAt('resumption ticket authentication failure');
   await page.locator('#flipIdentityBtn').click();
+  await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'true');
+  await page.locator('#flipBinderBtn').click();
+  await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'false');
+  await expect(page.locator('.abort-field')).toContainText('pre_shared_key.binders[0]');
+  await scanAt('resumption binder mismatch with a genuine ticket');
+  await page.locator('#flipBinderBtn').click();
   await expect(page.locator('[data-verdict="binder-check"]')).toHaveAttribute('data-ok', 'true');
 
   await page.locator('[data-psk-mode="psk_ke"]').click();

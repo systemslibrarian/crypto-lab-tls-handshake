@@ -38,7 +38,7 @@ async function deriveSecretFromHash(
   return hkdfExpandLabel(secret, label, transcriptHash, HASH_SIZE);
 }
 
-/** Derive-Secret(Main Secret, "res master", Hash(CH..client Finished)). */
+/** HKDF-Expand-Label(Main Secret, "res master", Hash(CH..client Finished), 32). */
 export async function deriveResumptionSecret(
   mainSecret: Uint8Array,
   transcriptToClientFinishedHash: Uint8Array,

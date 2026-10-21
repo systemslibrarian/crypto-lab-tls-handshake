@@ -15,6 +15,7 @@ import {
 } from './antireplay';
 import {
   flipOfferedIdentity,
+  flipPskBinder,
   parsePskClientHello,
   selectPskMode,
   type PskClientHello,
@@ -211,7 +212,13 @@ async function createResumedSession(
   };
 }
 
+export class ResumptionUnavailableError extends Error {}
+
 export async function createResumptionLab(fullHandshake: HandshakeTrace): Promise<ResumptionLab> {
+  if (!fullHandshake.chainVerdict.valid || !fullHandshake.certificateVerifyValid ||
+      !fullHandshake.serverFinishedValid || !fullHandshake.clientFinishedValid || !fullHandshake.sharedSecretAgrees) {
+    throw new ResumptionUnavailableError('A failed full handshake cannot establish a resumption session or issue a usable ticket.');
+  }
   const issuedAtMs = Date.now();
   const stek = randomBytes(AES128_KEY_BYTES);
   const clientFinishedHashHex = fullHandshake.steps.find((step) => step.id === 'client-finished')?.transcriptHashHex;
@@ -230,6 +237,8 @@ export async function createResumptionLab(fullHandshake: HandshakeTrace): Promis
 }
 
 export interface BinderProbe {
+  kind: 'genuine' | 'identity' | 'binder';
+  ticketValid: boolean;
   valid: boolean;
   field: string;
   earlyPlaintextReleased: boolean;
@@ -239,18 +248,25 @@ export interface BinderProbe {
 export async function runBinderProbe(
   lab: ResumptionLab,
   mode: PskMode,
-  flipIdentity: boolean,
+  kind: BinderProbe['kind'],
 ): Promise<BinderProbe> {
   const session = lab.sessions[mode];
-  const wire = flipIdentity ? flipOfferedIdentity(session.clientHello.full) : session.clientHello.full;
+  const wire = kind === 'identity' ? flipOfferedIdentity(session.clientHello.full)
+    : kind === 'binder' ? flipPskBinder(session.clientHello.full) : session.clientHello.full;
   const parsed = parsePskClientHello(wire);
-  const valid = await verifyResumptionBinder(lab.issued.psk, parsed.truncated, parsed.binder);
+  // Use the real server path: authenticate the offered ticket before checking
+  // its binder. This probe's policy declines early data even for a good binder.
+  const server = new EarlyDataServer('binder probe', 'ignore-0rtt', lab.stek);
+  const admission = await server.receive(
+    { clientHello: wire, earlyDataRecord: session.earlyRecord.wire },
+    'original', lab.issuedAtMs + CLIENT_TICKET_AGE_MS,
+  );
   return {
-    valid,
-    field: valid ? 'pre_shared_key.binders[0]' : 'pre_shared_key.binders[0] mismatch',
-    // Deliberately no decrypt call exists on this path. A failed binder can
-    // never return even partial early plaintext.
-    earlyPlaintextReleased: false,
+    kind,
+    ticketValid: admission.ticketValid,
+    valid: admission.binderValid,
+    field: admission.abortField,
+    earlyPlaintextReleased: admission.earlyDataDecrypted || admission.plaintext.length > 0,
     clientHello: parsed,
   };
 }
@@ -322,9 +338,7 @@ export async function runReplayScenario(
   const originalTime = lab.issuedAtMs + CLIENT_TICKET_AGE_MS;
   const first = await a.receive(original, 'original', originalTime);
   const replayA = await a.receive(replay, 'replay', originalTime + INSIDE_REPLAY_DELAY_MS);
-  const replayB = configuration === 'clienthello-recording'
-    ? await b.receive(replay, 'replay', originalTime + INSIDE_REPLAY_DELAY_MS)
-    : replayA;
+  const replayB = await b.receive(replay, 'replay', originalTime + INSIDE_REPLAY_DELAY_MS);
 
   let outsideWindow: AdmissionResult | null = null;
   if (configuration === 'freshness-window') {
@@ -340,10 +354,6 @@ export async function runReplayScenario(
     oneRttReplayRejected = await proveOneRttReplayRejected(lab);
   }
 
-  const regionBView = configuration === 'clienthello-recording'
-    ? { executedPayments: b.executedPayments, log: [...b.log] }
-    : { executedPayments: a.executedPayments, log: [...a.log] };
-
   let verdictOk: boolean;
   let verdict: string;
   switch (configuration) {
@@ -352,7 +362,7 @@ export async function runReplayScenario(
       verdict = a.executedPayments === 2 ? 'ALARM — EXECUTED TWICE' : 'REPLAY REFUSED';
       break;
     case 'single-use-ticket':
-      verdictOk = a.executedPayments === 1 && !replayA.accepted0Rtt;
+      verdictOk = a.executedPayments === 1 && !replayA.accepted0Rtt && !replayB.accepted0Rtt;
       verdict = verdictOk ? 'REPLAY REFUSED — TICKET ALREADY USED' : 'ALARM — REPLAY ACCEPTED';
       break;
     case 'clienthello-recording':
@@ -376,7 +386,7 @@ export async function runReplayScenario(
   return {
     configuration,
     regionA: { executedPayments: a.executedPayments, log: [...a.log] },
-    regionB: regionBView,
+    regionB: { executedPayments: b.executedPayments, log: [...b.log] },
     first,
     replayA,
     replayB,

@@ -1,0 +1,86 @@
+[
+  {
+    "marker": "binder-check",
+    "file": "src/resumption.ts",
+    "anchor": "return equalBytes(expected.binder, receivedBinder);",
+    "replacement": "return equalBytes(expected.binder, receivedBinder) || receivedBinder.length === 32;"
+  },
+  {
+    "marker": "replay-no-anti-replay",
+    "file": "src/broken/no-anti-replay.ts",
+    "anchor": "return true;",
+    "replacement": "return false;"
+  },
+  {
+    "marker": "replay-single-use-ticket",
+    "file": "src/antireplay.ts",
+    "anchor": "this.stores.usedTickets.has(ticketId)",
+    "replacement": "this.stores.usedTickets.has('unused-' + ticketId)"
+  },
+  {
+    "marker": "replay-clienthello-recording",
+    "file": "src/antireplay.ts",
+    "anchor": "this.stores.clientHellos.has(fingerprint)",
+    "replacement": "this.stores.clientHellos.has('unrecorded-' + fingerprint)"
+  },
+  {
+    "marker": "replay-freshness-window",
+    "file": "src/antireplay.ts",
+    "anchor": "freshnessToleranceMs = 10_000,",
+    "replacement": "freshnessToleranceMs = 0,"
+  },
+  {
+    "marker": "replay-ignore-0rtt",
+    "file": "src/antireplay.ts",
+    "anchor": "if (this.configuration === 'ignore-0rtt') {",
+    "replacement": "if (this.configuration === 'ignore-0rtt' && false) {"
+  },
+  {
+    "marker": "stek-psk-ke",
+    "file": "src/attack/stek-leak.ts",
+    "anchor": "psk: ticket.psk,",
+    "replacement": "psk: wrongDheGuess,"
+  },
+  {
+    "marker": "stek-psk-dhe",
+    "file": "src/resumption.ts",
+    "anchor": "asymmetricInput = input.dheSharedSecret;",
+    "replacement": "asymmetricInput = new Uint8Array(HASH_SIZE);"
+  },
+  {
+    "marker": "one-rtt-fallback",
+    "file": "src/antireplay.ts",
+    "anchor": "oneRttFallback: true,\n          reason: 'outside the freshness window; reject 0-RTT but allow 1-RTT',",
+    "replacement": "oneRttFallback: false,\n          reason: 'outside the freshness window; reject 0-RTT but allow 1-RTT',"
+  },
+  {
+    "marker": "handshake-gate",
+    "file": "src/resumption-lab.ts",
+    "anchor": "if (!fullHandshake.chainVerdict.valid || !fullHandshake.certificateVerifyValid ||\n      !fullHandshake.serverFinishedValid || !fullHandshake.clientFinishedValid || !fullHandshake.sharedSecretAgrees) {",
+    "replacement": "if (false && (!fullHandshake.chainVerdict.valid || !fullHandshake.certificateVerifyValid ||\n      !fullHandshake.serverFinishedValid || !fullHandshake.clientFinishedValid || !fullHandshake.sharedSecretAgrees)) {"
+  },
+  {
+    "marker": "hello-groups",
+    "file": "src/clienthello-psk.ts",
+    "anchor": "const supportedGroups = extension(EXT_SUPPORTED_GROUPS, vec(u16(X25519), 2));",
+    "replacement": "const supportedGroups = new Uint8Array();"
+  },
+  {
+    "marker": "ticket-freshness",
+    "file": "src/antireplay.ts",
+    "anchor": "// Duplicate tracking is an additional defence, not a replacement for it.\n    {",
+    "replacement": "// Duplicate tracking is an additional defence, not a replacement for it.\n    if (this.configuration === 'freshness-window') {"
+  },
+  {
+    "marker": "ticket-expiry",
+    "file": "src/ticket.ts",
+    "anchor": "return nowMs - state.issuedAtMs >= state.lifetimeSeconds * 1_000;",
+    "replacement": "return nowMs - state.issuedAtMs > state.lifetimeSeconds * 1_000;"
+  },
+  {
+    "marker": "region-routing",
+    "file": "src/resumption-lab.ts",
+    "anchor": "regionB: { executedPayments: b.executedPayments, log: [...b.log] },",
+    "replacement": "regionB: { executedPayments: a.executedPayments, log: [...a.log] },"
+  }
+]

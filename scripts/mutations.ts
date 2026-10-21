@@ -1,4 +1,4 @@
-/** Reproducible §4.1c verdict-mutation gate for the resumption extension. */
+/** Replay source mutations against committed protocol behaviour, before deployment. */
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -11,74 +11,23 @@ interface Mutation {
   replacement: string;
 }
 
-const mutations: Mutation[] = [
-  {
-    marker: 'binder-check',
-    file: 'src/resumption-lab.ts',
-    anchor: 'const valid = await verifyResumptionBinder(lab.issued.psk, parsed.truncated, parsed.binder);',
-    replacement: 'const valid = !(await verifyResumptionBinder(lab.issued.psk, parsed.truncated, parsed.binder));',
-  },
-  {
-    marker: 'replay-no-anti-replay',
-    file: 'src/resumption-lab.ts',
-    anchor: "case 'no-anti-replay':\n      verdictOk = a.executedPayments < 2;",
-    replacement: "case 'no-anti-replay':\n      verdictOk = a.executedPayments <= 2;",
-  },
-  {
-    marker: 'replay-single-use-ticket',
-    file: 'src/resumption-lab.ts',
-    anchor: "verdictOk = a.executedPayments === 1 && !replayA.accepted0Rtt;",
-    replacement: "verdictOk = a.executedPayments === 1 && replayA.accepted0Rtt;",
-  },
-  {
-    marker: 'replay-clienthello-recording',
-    file: 'src/resumption-lab.ts',
-    anchor: 'verdictOk = !replayA.accepted0Rtt && !replayB.accepted0Rtt;',
-    replacement: 'verdictOk = !replayA.accepted0Rtt && replayB.accepted0Rtt;',
-  },
-  {
-    marker: 'replay-freshness-window',
-    file: 'src/resumption-lab.ts',
-    anchor: "case 'freshness-window':\n      verdictOk = a.executedPayments < 2;",
-    replacement: "case 'freshness-window':\n      verdictOk = a.executedPayments <= 2;",
-  },
-  {
-    marker: 'replay-ignore-0rtt',
-    file: 'src/resumption-lab.ts',
-    anchor: 'verdictOk = a.executedPayments === 1 && oneRttReplayRejected;',
-    replacement: 'verdictOk = a.executedPayments === 1 && !oneRttReplayRejected;',
-  },
-  {
-    marker: 'stek-psk-ke',
-    file: 'src/main.ts',
-    anchor: "markedPill(!leak.pskKe.oneRttReadable, leak.pskKe.oneRttReadable ? 'ALARM — PAST SESSION READ' : 'PAST SESSION SEALED', 'stek-psk-ke', true)",
-    replacement: "markedPill(leak.pskKe.oneRttReadable, leak.pskKe.oneRttReadable ? 'ALARM — PAST SESSION READ' : 'PAST SESSION SEALED', 'stek-psk-ke', true)",
-  },
-  {
-    marker: 'stek-psk-dhe',
-    file: 'src/main.ts',
-    anchor: "markedPill(!(leak.pskDhe.earlyDataReadable && !leak.pskDhe.oneRttReadable), '1-RTT HOLDS — 0-RTT EXPOSED', 'stek-psk-dhe', true)",
-    replacement: "markedPill(leak.pskDhe.earlyDataReadable && !leak.pskDhe.oneRttReadable, '1-RTT HOLDS — 0-RTT EXPOSED', 'stek-psk-dhe', true)",
-  },
-  {
-    marker: 'one-rtt-fallback',
-    file: 'src/main.ts',
-    anchor: "markedPill(state.edgeCases.freshnessFallback.oneRttFallback, '1-RTT FALLBACK AVAILABLE', 'one-rtt-fallback', true)",
-    replacement: "markedPill(!state.edgeCases.freshnessFallback.oneRttFallback, '1-RTT FALLBACK AVAILABLE', 'one-rtt-fallback', true)",
-  },
-];
-
+const mutations = JSON.parse(readFileSync('scripts/mutation-ledger.json', 'utf8')) as Mutation[];
 const childEnv = { ...process.env, CI: '1', NO_COLOR: '1' };
 delete childEnv.FORCE_COLOR;
 
-function run(command: string, args: string[], expectSuccess = true): { status: number; output: string } {
-  const result = spawnSync(command, args, { cwd: process.cwd(), env: childEnv, encoding: 'utf8' });
-  const status = result.status ?? 1;
+function run(command: string, args: string[], expectSuccess = true) {
+  const result = spawnSync(command, args, {
+    cwd: process.cwd(), env: childEnv, encoding: 'utf8',
+    timeout: 180_000, maxBuffer: 16 * 1024 * 1024,
+  });
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-  if (expectSuccess && status !== 0) {
-    throw new Error(`${command} ${args.join(' ')} failed (${status})\n${output}`);
+  if (result.error || result.signal || result.status === null) {
+    throw new Error(`${command} did not complete normally: ${result.error?.message ?? result.signal}`);
   }
-  return { status, output };
+  if (expectSuccess && result.status !== 0) {
+    throw new Error(`${command} ${args.join(' ')} failed (${result.status})\n${output}`);
+  }
+  return { status: result.status, stdout: result.stdout, output };
 }
 
 function bundleHash(): string {
@@ -90,56 +39,72 @@ function bundleHash(): string {
   return hash.digest('hex');
 }
 
-function replaceExactlyOnce(file: string, from: string, to: string): void {
-  const source = readFileSync(file, 'utf8');
-  const occurrences = source.split(from).length - 1;
-  if (occurrences !== 1) throw new Error(`${file}: mutation anchor occurs ${occurrences} times (wanted 1)`);
-  writeFileSync(file, source.replace(from, to));
+function owningTest(marker: string, expectedStatus: 'passed' | 'failed'): void {
+  const result = run('npx', [
+    '--no-install', 'playwright', 'test', 'e2e/claims.spec.ts', 'e2e/resumption-protocol.spec.ts',
+    '--grep', `\\[verdict:${marker}\\]`, '--retries=0', '--workers=1', '--reporter=json',
+  ], expectedStatus === 'passed');
+  let report;
+  try {
+    report = JSON.parse(result.stdout);
+  } catch {
+    throw new Error(`${marker}: no valid Playwright JSON report\n${result.output}`);
+  }
+  if (report.errors?.length) throw new Error(`${marker}: infrastructure failure: ${JSON.stringify(report.errors)}`);
+  const specs: any[] = [];
+  function visit(suite: any): void {
+    specs.push(...(suite.specs ?? []));
+    for (const child of suite.suites ?? []) visit(child);
+  }
+  for (const suite of report.suites ?? []) visit(suite);
+  if (specs.length !== 1 || !specs[0].title.includes(`[verdict:${marker}]`)) {
+    throw new Error(`${marker}: expected exactly one owning test, got ${specs.map((spec) => spec.title).join(', ')}`);
+  }
+  const tests = specs[0].tests ?? [];
+  if (tests.length !== 1 || tests[0].expectedStatus !== 'passed' || tests[0].results?.length !== 1) {
+    throw new Error(`${marker}: missing, skipped, expected-failure or retried tests cannot prove a kill`);
+  }
+  const observed = tests[0].results[0];
+  if (observed.status !== expectedStatus || (expectedStatus === 'failed' && result.status === 0)) {
+    throw new Error(`${marker}: expected ${expectedStatus}, got ${observed.status}; timeouts are not kills`);
+  }
+  if (expectedStatus === 'failed' && observed.errors?.some((error: any) =>
+    /at boot\b|browserType\.launch|page\.goto|Test timeout|webServer/i.test(`${error.message ?? ''}\n${error.stack ?? ''}`))) {
+    throw new Error(`${marker}: startup, navigation or infrastructure failure cannot prove a kill`);
+  }
+  if (expectedStatus === 'failed' && !observed.errors?.some((error: any) =>
+    /\bexpect\(|AssertionError/.test((error.message ?? '').replace(/\u001b\[[0-9;]*m/g, '')))) {
+    throw new Error(`${marker}: failure was not a named assertion: ${JSON.stringify(observed.errors)}`);
+  }
 }
 
-function owningTest(marker: string, expectSuccess: boolean): { status: number; output: string } {
-  return run(
-    'npx',
-    ['playwright', 'test', 'e2e/claims.spec.ts', '--grep', `\\[verdict:${marker}\\]`, '--retries=0'],
-    expectSuccess,
-  );
-}
-
-const dirty = run('git', ['status', '--porcelain'], true).output.trim();
+const dirty = run('git', ['status', '--porcelain']).output.trim();
 if (dirty) throw new Error(`mutation gate requires a clean committed tree:\n${dirty}`);
-
 run('npm', ['run', 'build']);
 const baselineHash = bundleHash();
-const killed: string[] = [];
 
 for (const mutation of mutations) {
-  owningTest(mutation.marker, true);
-  replaceExactlyOnce(mutation.file, mutation.anchor, mutation.replacement);
+  const original = readFileSync(mutation.file, 'utf8');
+  if (original.split(mutation.anchor).length !== 2) {
+    throw new Error(`${mutation.marker}: source anchor must occur exactly once`);
+  }
+  owningTest(mutation.marker, 'passed');
+  console.log(`[${mutation.marker}] baseline green`);
   try {
-    const diff = run('git', ['diff', '--', mutation.file]).output.trim();
-    if (!diff) throw new Error(`${mutation.marker}: source diff is empty`);
-    run('npm', ['run', 'build']);
-    const mutatedHash = bundleHash();
-    if (mutatedHash === baselineHash) throw new Error(`${mutation.marker}: bundle hash did not move`);
-    const red = owningTest(mutation.marker, false);
-    if (red.status === 0) throw new Error(`${mutation.marker}: owning test stayed green`);
-    if (/does not build|EADDRINUSE|ERR_CONNECTION_REFUSED|webServer.*failed/i.test(red.output)) {
-      throw new Error(`${mutation.marker}: red run was infrastructure/build failure\n${red.output}`);
-    }
+    writeFileSync(mutation.file, original.replace(mutation.anchor, mutation.replacement));
+    if (!run('git', ['diff', '--', mutation.file]).output.trim()) throw new Error('source diff is empty');
+    run('npm', ['run', 'build']); // Compile/build failure never counts as a kill.
+    const mutantHash = bundleHash();
+    if (mutantHash === baselineHash) throw new Error(`${mutation.marker}: production bundle hash did not move`);
+    owningTest(mutation.marker, 'failed');
+    console.log(`[${mutation.marker}] source diff non-empty; bundle ${baselineHash.slice(0, 12)} -> ${mutantHash.slice(0, 12)}; named assertion red`);
   } finally {
-    replaceExactlyOnce(mutation.file, mutation.replacement, mutation.anchor);
+    writeFileSync(mutation.file, original);
+    run('npm', ['run', 'build']);
+    if (bundleHash() !== baselineHash) throw new Error(`${mutation.marker}: restored bundle differs`);
+    owningTest(mutation.marker, 'passed');
+    if (run('git', ['diff', 'HEAD', '--', mutation.file]).output.trim()) throw new Error('source did not restore cleanly');
+    console.log(`[${mutation.marker}] source restored; original bundle hash; named test green`);
   }
-
-  run('npm', ['run', 'build']);
-  const restoredHash = bundleHash();
-  if (restoredHash !== baselineHash) throw new Error(`${mutation.marker}: restored bundle hash differs`);
-  owningTest(mutation.marker, true);
-  if (run('git', ['diff', '--', mutation.file]).output.trim()) {
-    throw new Error(`${mutation.marker}: source did not restore cleanly`);
-  }
-  killed.push(mutation.marker);
-  console.log(`KILLED ${mutation.marker}: baseline green; source diff non-empty; bundle hash moved; named test red; restored green`);
 }
-
-if (killed.length !== mutations.length) throw new Error(`killed ${killed.length} of ${mutations.length}`);
-console.log(`MUTATIONS PASS: ${killed.length} of ${mutations.length} killed`);
+console.log(`MUTATIONS PASS: ${mutations.length} of ${mutations.length} behavioural source mutations killed`);
