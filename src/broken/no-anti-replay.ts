@@ -5,6 +5,6 @@
  * isolated so the unsafe acceptance rule cannot be mistaken for the ordinary
  * server path.
  */
-export function acceptWithoutReplayProtection(): true {
+export function acceptWithoutReplayProtection(): boolean {
   return true;
 }
