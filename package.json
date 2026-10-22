@@ -18,8 +18,8 @@
     "test:mutations": "tsx scripts/mutations.ts"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.13.0",
-    "@playwright/test": "^1.64.0",
+    "@axe-core/playwright": "^4.14.0",
+    "@playwright/test": "^1.64.1",
     "tsx": "^4.23.15",
     "typescript": "~7.0.2",
     "vite": "^8.3.4"
