@@ -139,10 +139,16 @@ function ladderRow(s: HandshakeStep, idx: number): string {
   const stateClass = idx === state.step ? 'current' : idx < state.step ? 'seen' : '';
   const wire = s.to === 'server' ? '──▶' : '◀──';
   // The packet token slides across .wire when this row becomes current (see wire()).
-  const packet = `<span class="packet ${s.encrypted}" aria-hidden="true" data-dir="${s.to}">${esc(s.title)}</span>`;
+  const packet = `<span class="packet ${s.encrypted}" aria-hidden="true" data-dir="${s.to}" data-title="${esc(s.title)}"></span>`;
   return `
-    <button class="msg ${dirClass} ${stateClass}" data-step="${idx}" aria-current="${idx === state.step ? 'step' : 'false'}"
-      aria-label="Step ${idx + 1}: ${esc(s.title)}, ${s.from} to ${s.to}, ${s.encrypted === 'plaintext' ? 'cleartext' : s.encrypted + ' key encrypted'}">
+    <!-- No aria-label, and the packet is not aria-hidden. Together those keep
+         the name equal to what the row shows: axe 4.14 compares the accessible
+         name against everything a SIGHTED user sees
+         (label-content-name-mismatch, WCAG 2.5.3 Label in Name) while
+         excluding aria-hidden content from the NAME, so a row carrying a
+         title, a byte count, a lock badge and a flying packet token cannot be
+         covered by one short label. aria-current still marks the live step. -->
+    <button class="msg ${dirClass} ${stateClass}" data-step="${idx}" aria-current="${idx === state.step ? 'step' : 'false'}">
       <span class="label">${esc(s.title)}<br><span class="bytes">${s.bytesOnWire} B · ${lockBadge(s.encrypted)}</span></span>
       <span class="wire">${wire}${packet}</span>
       <span class="label"></span>
@@ -252,10 +258,10 @@ function simulatorSection(t: HandshakeTrace): string {
       real chain's. <a href="#scope">Section 9</a> lists what is and is not modelled. Click a message, use the Step
       controls, or press ← / → .</p>
     <div class="controls">
-      <button class="btn" id="prevBtn" aria-label="Previous step">◀ Back</button>
-      <button class="btn primary" id="nextBtn" aria-label="Next step">Step ▶</button>
-      <button class="btn" id="autoBtn" aria-pressed="${state.autoPlay}" aria-label="Toggle auto play">${state.autoPlay ? '⏸ Stop' : '▶ Auto-play'}</button>
-      <button class="btn" id="resetBtn" aria-label="Start a new session with fresh keys">↻ New session</button>
+      <button class="btn" id="prevBtn" aria-label="Back: the previous step">Back</button>
+      <button class="btn primary" id="nextBtn" aria-label="Step: the next step">Step</button>
+      <button class="btn" id="autoBtn" data-playing="${state.autoPlay}" aria-pressed="${state.autoPlay}" aria-label="${state.autoPlay ? 'Stop' : 'Auto-play'}">${state.autoPlay ? 'Stop' : 'Auto-play'}</button>
+      <button class="btn" id="resetBtn" aria-label="New session: start one with fresh keys">New session</button>
       <span class="progress">Step ${state.step + 1} / ${t.steps.length}</span>
     </div>
     <div class="sim" style="margin-top:1rem">

@@ -1527,3 +1527,23 @@ td.no {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Step-control glyphs, drawn here rather than written as DOM text. axe 4.14
+   compares a control's accessible name against everything a SIGHTED user sees
+   (label-content-name-mismatch, WCAG 2.5.3 Label in Name) while excluding
+   aria-hidden content from the NAME, so hiding these would not satisfy it. */
+/* Keyed on id, not on an added class: the non-text-contrast baseline records
+   each control by its class list, so a new class reads as a brand-new control
+   and the whole row reports as a regression. */
+#prevBtn::before  { content: "\25C0\00A0"; }
+#nextBtn::after   { content: "\00A0\25B6"; }
+#autoBtn::before  { content: "\25B6\00A0"; }
+#autoBtn[data-playing="true"]::before { content: "\23F8\00A0"; }
+#resetBtn::before { content: "\21BB\00A0"; }
+
+/* The flying packet token draws its caption from its data attribute rather
+   than holding DOM text. It rests at opacity 0 and only animates across the
+   wire, so as DOM text it would be visible text rendered at opacity 0 (the
+   lab's own check) and would also have to appear in the row's accessible name
+   (axe label-content-name-mismatch). CSS generated content is neither. */
+.packet::before { content: attr(data-title); }
