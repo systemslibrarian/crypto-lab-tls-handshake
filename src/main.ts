@@ -13,6 +13,8 @@ import {
 import { REPLAY_CONFIGURATIONS, type ReplayConfiguration } from './antireplay';
 import type { PskMode } from './clienthello-psk';
 import { toHex } from './primitives';
+import { BINDING_POLICIES, SERVICE_ROUTES, type BindingHandshakeChecks, type BindingPolicy, type ServiceRoute } from './service-binding';
+import { serviceBindingSection, updateServiceBinding } from './service-binding-ui';
 import {
   DEFAULT_PSK_MODE,
   DEFAULT_REPLAY_MODE,
@@ -52,6 +54,8 @@ interface State {
   replayStage: 'idle' | 'recorded' | 'replayed';
   replay: ReplayScenario | null;
   retiredVerdicts: number;
+  bindingRoute: ServiceRoute;
+  bindingPolicy: BindingPolicy;
 }
 
 const initialTrace = await runFullHandshake();
@@ -72,6 +76,8 @@ const state: State = {
   replayStage: 'idle',
   replay: null,
   retiredVerdicts: 0,
+  bindingRoute: SERVICE_ROUTES.find((route) => route.id === 'same-name-mail')!,
+  bindingPolicy: BINDING_POLICIES[0],
 };
 
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -106,6 +112,13 @@ function stopAuto(): void {
     state.autoTimer = null;
   }
   state.autoPlay = false;
+  const button = document.querySelector<HTMLButtonElement>('#autoBtn');
+  if (button) {
+    button.dataset.playing = 'false';
+    button.setAttribute('aria-pressed', 'false');
+    button.setAttribute('aria-label', 'Auto-play');
+    button.textContent = 'Auto-play';
+  }
 }
 
 // ---- section renderers -----------------------------------------------------
@@ -255,7 +268,7 @@ function simulatorSection(t: HandshakeTrace): string {
       computed for real — the keys are derived from this session's X25519 secret and the transcript hashes are SHA-256
       over the actual message bytes. The message framing is real TLS too, with one exception: the
       <code>Certificate</code> body uses a demo encoding rather than DER X.509, so its byte count is this demo's, not a
-      real chain's. <a href="#scope">Section 9</a> lists what is and is not modelled. Click a message, use the Step
+      real chain's. <a href="#scope">Section 10</a> lists what is and is not modelled. Click a message, use the Step
       controls, or press ← / → .</p>
     <div class="controls">
       <button class="btn" id="prevBtn" aria-label="Back: the previous step">Back</button>
@@ -706,7 +719,7 @@ function resumptionSection(): string {
 function comparisonSection(): string {
   return `
   <section class="panel">
-    <h2><span class="section-num">8</span> TLS 1.3 vs 1.2 &amp; Takeaways</h2>
+    <h2><span class="section-num">9</span> TLS 1.3 vs 1.2 &amp; Takeaways</h2>
     <table>
       <caption class="lead">How TLS 1.3 cleaned up the handshake</caption>
       <thead><tr><th>Property</th><th>TLS 1.2</th><th>TLS 1.3</th></tr></thead>
@@ -720,6 +733,7 @@ function comparisonSection(): string {
     </table>
     <ul class="takeaways">
       <li><strong>Key exchange ≠ authentication.</strong> ECDHE gives you a shared secret with <em>someone</em>; signatures prove it's the right someone.</li>
+      <li><strong>A valid handshake does not identify an application protocol.</strong> Validate the certificate hostname, enforce the requested server name, and bind the selected ALPN protocol to the receiving service. <a href="#service-binding">Try the service-routing exercise.</a></li>
       <li><strong>Forward secrecy comes from ephemeral key agreement.</strong> Use fresh (EC)DHE and discard its private keys. PSK-only mode and 0-RTT do not provide this protection.</li>
       <li><strong>Common real-world failures:</strong> trusting an unvalidated certificate, accepting downgrades to TLS 1.2/1.0, expired or misissued certs, and missing SNI/hostname checks.</li>
     </ul>
@@ -751,10 +765,10 @@ const SCOPE: { heading: string; bullets: string[] }[] = [
     heading: 'What this deliberately does NOT model',
     bullets: [
       'X.509. The Certificate message carries a demo-specific body — subject ‖ issuer ‖ public key ‖ signature, each a length-prefixed vector — not DER-encoded certificates. The "bytes on the wire" figure for that step is therefore this demo\'s encoding; a real chain is several times larger.',
-      'Hostname / SAN verification. Nothing checks that the certificate names the host you connected to. Chain validation here is exactly three things: the root matches the trust anchor, the root self-signature verifies, and the leaf is signed by the root.',
+      'Hostname / SAN verification in the cryptographic handshake. Chain validation here checks the trust anchor, root self-signature, and leaf signature. The separate service-routing exercise compares declared exact DNS-name fixtures; it does not parse or verify X.509 SANs.',
       'Certificate validity periods, key usage / extended key usage, name constraints, path length, and revocation (CRL, OCSP, stapling). None of them exist in this model.',
       'A real trust store. The trust anchor is a root generated in this page, not one shipped by your browser or OS.',
-      'HelloRetryRequest, client certificate authentication, ALPN/SNI handling, general post-handshake messages, and KeyUpdate.',
+      'HelloRetryRequest, client certificate authentication, network ALPN/SNI negotiation, general post-handshake messages, and KeyUpdate. Section 8 models service-admission decisions without adding ALPN/SNI extensions to the handshake bytes.',
       'Algorithm negotiation. One cipher suite (TLS_AES_128_GCM_SHA256) and one group (x25519); nothing is chosen or downgraded.',
       'Constant-time execution. This is JavaScript in a browser and makes no side-channel guarantees.',
     ],
@@ -774,7 +788,7 @@ const SCOPE: { heading: string; bullets: string[] }[] = [
 function scopeSection(): string {
   return `
   <section class="panel" id="scope">
-    <h2><span class="section-num">9</span> Scope — What This Demo Does and Does Not Model</h2>
+    <h2><span class="section-num">10</span> Scope — What This Demo Does and Does Not Model</h2>
     <p class="lead">The cryptography here is real, which is exactly why the boundaries need stating: a demo that looks
       like TLS is easy to mistake for TLS. Everything below describes this page, not the protocol.</p>
     <div class="scope-cards">
@@ -818,6 +832,17 @@ function footer(): string {
 
 // ---- render + wiring -------------------------------------------------------
 
+function bindingHandshakeChecks(): BindingHandshakeChecks {
+  const t = state.trace;
+  return {
+    chainValid: t.chainVerdict.valid,
+    certificateVerifyValid: t.certificateVerifyValid,
+    serverFinishedValid: t.serverFinishedValid,
+    clientFinishedValid: t.clientFinishedValid,
+    sharedSecretAgrees: t.sharedSecretAgrees,
+  };
+}
+
 function render(): void {
   const t = state.trace;
   appRoot.innerHTML = `
@@ -833,8 +858,8 @@ function render(): void {
         <aside class="cl-hero-why" aria-label="Why it matters">
           <span class="cl-hero-why-label">WHY IT MATTERS</span>
           <p class="cl-hero-why-text">HTTPS guards every login, payment, and message you send. Key exchange alone gives
-            you a shared secret with <em>someone</em>; only the certificate signature proves it's the real server, and
-            that authentication step is exactly what stops a machine-in-the-middle from silently reading it all.</p>
+            you a shared secret with <em>someone</em>. A trusted certificate and proof of its private key authenticate
+            the peer; the application must also check the hostname and intended service.</p>
         </aside>
       </header>
       ${overviewSection()}
@@ -844,6 +869,7 @@ function render(): void {
       ${scheduleSection(t)}
       ${recordSection(t)}
       ${resumptionSection()}
+      ${serviceBindingSection(state.bindingRoute, state.bindingPolicy, bindingHandshakeChecks())}
       ${comparisonSection()}
       ${scopeSection()}
     </main>
@@ -990,6 +1016,21 @@ function wire(): void {
     render();
   });
 
+  document.querySelector<HTMLSelectElement>('#bindingRoute')?.addEventListener('change', (event) => {
+    const route = SERVICE_ROUTES.find((choice) => choice.id === (event.currentTarget as HTMLSelectElement).value);
+    if (!route) return;
+    stopAuto();
+    state.bindingRoute = route;
+    updateServiceBinding(state.bindingRoute, state.bindingPolicy, bindingHandshakeChecks());
+  });
+  document.querySelector<HTMLSelectElement>('#bindingPolicy')?.addEventListener('change', (event) => {
+    const policy = BINDING_POLICIES.find((choice) => choice.id === (event.currentTarget as HTMLSelectElement).value);
+    if (!policy) return;
+    stopAuto();
+    state.bindingPolicy = policy;
+    updateServiceBinding(state.bindingRoute, state.bindingPolicy, bindingHandshakeChecks());
+  });
+
   animatePacket();
 }
 
@@ -1025,6 +1066,7 @@ function animatePacket(): void {
 
 // Global keyboard navigation for the simulator.
 window.addEventListener('keydown', (e) => {
+  if ((e.target as Element | null)?.closest('input, select, textarea, [contenteditable="true"]')) return;
   if (e.key === 'ArrowRight') {
     stopAuto();
     go(state.step + 1);

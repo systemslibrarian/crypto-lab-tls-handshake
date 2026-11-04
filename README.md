@@ -16,7 +16,9 @@ ClientHello binder, compares `psk_dhe_ke` with the deliberately weak `psk_ke`, p
 0-RTT records, and lets you replay a bill payment against five server policies. It is an honest
 educational simulation, not a hardened TLS stack: it deliberately omits HelloRetryRequest,
 client authentication, X.509 encoding, and every name/validity/revocation check a real client
-performs. The page states those boundaries itself, in a Scope panel.
+performs. A separate service-routing exercise uses declared DNS-name and ALPN fixtures
+to teach application admission without adding those extensions to the cryptographic
+handshake. The page states those boundaries itself, in a Scope panel.
 
 ## Exhibits
 
@@ -27,8 +29,9 @@ performs. The page states those boundaries itself, in a Scope panel.
 5. **Key Derivation & Forward Secrecy** — the no-PSK full-handshake schedule and one worked HKDF expansion.
 6. **Record Layer** — an AES-128-GCM application record and tamper rejection.
 7. **Resumption & 0-RTT** — ticket-to-PSK derivation, binder failure, STEK compromise, and replay policies.
-8. **TLS 1.3 vs 1.2 & Takeaways** — the protocol cleanup in context.
-9. **Scope** — what is faithful, compressed, or deliberately absent.
+8. **A Valid Handshake — For Which Service?** — independent certificate-name, SNI, and ALPN checks against eight declared service routes.
+9. **TLS 1.3 vs 1.2 & Takeaways** — the protocol cleanup in context.
+10. **Scope** — what is faithful, compressed, or deliberately absent.
 
 ## What Can Go Wrong
 
@@ -38,6 +41,7 @@ performs. The page states those boundaries itself, in a Scope panel.
 - **Every ticket-based early-data policy checks ticket age.** Single-use tickets and ClientHello recording add duplicate tracking. Freshness alone rejects late copies but permits replays inside the tolerance.
 - **Failed full handshakes cannot establish resumption.** A failed chain, signature, Finished check, or shared-secret agreement prevents ticket issuance and retires the resumption panel's previous results.
 - **Ticket authentication precedes binder verification.** Flipping opaque ticket bytes fails ticket AEAD; flipping only the binder fails the binder check. Neither failure releases early plaintext.
+- **A valid handshake can reach the wrong service.** A certificate covering the requested hostname does not identify an application protocol. In the service-routing model, a mail service on the same hostname passes strict SNI; requiring matched ALPN blocks it. Conversely, ALPN alone does not distinguish two names offering the same protocol.
 
 ## When to Use It
 
@@ -97,8 +101,45 @@ fresh (EC)DHE; `psk_ke` and 0-RTT do not. A closing **Scope** panel states
 in the page itself what is
 modelled faithfully and what is not: the certificate chain is not X.509 (so the
 `Certificate` step's byte count is this demo's encoding), no hostname/SAN, validity, or
-revocation check exists, HelloRetryRequest and client authentication are omitted, nothing is negotiated,
+revocation check exists in that cryptographic handshake, HelloRetryRequest and client authentication are omitted, nothing is negotiated on a network,
 and only application-data records (including 0-RTT) are actually AEAD-sealed.
+
+## Application Service Binding
+
+The **A Valid Handshake — For Which Service?** panel is a bounded, synthetic admission
+exercise. It keeps four checks separate: the current simulator's real cryptographic
+handshake result; whether declared certificate DNS names include the requested hostname;
+whether the endpoint recognizes the requested SNI name; and whether an ALPN selection was
+offered, is supported, matches the client's intended protocol, and is honored by the
+receiving application handler.
+
+Try **Same hostname, mail service** with **Add strict SNI**: the name matches but the
+wrong service is admitted. Switch to **Require SNI + ALPN**: the disjoint protocol lists
+cause rejection. **Other hostname, web service** provides the converse control—ALPN
+matches while strict server-name policy fails. The remaining controls include the
+intended endpoint, another hostname's mail endpoint, a certificate for the wrong name,
+missing ALPN, an unoffered selection, and an HTTP selection delivered to a mail handler.
+A failed cryptographic handshake blocks all routes under every policy; the synthetic
+name/protocol observations remain independent.
+
+SNI is a server-side name/routing policy, not the client's certificate hostname check.
+The client-name comparison here handles only declared exact ASCII DNS names; it is not
+X.509/SAN validation and includes no wildcards, IDNA, DNS resolution, or port identity.
+ALPN identifiers are compared exactly. Requiring an ALPN selection is the exercise's
+explicit application policy, not a claim that every TLS application must reject absent
+ALPN. Policies that omit checks are deliberately incomplete controls.
+
+No SNI/ALPN bytes are added to ClientHello or EncryptedExtensions, and no network TLS,
+HTTP/SMTP parsing, traffic redirection, or real ALPACA exploit occurs. Wrong-service
+admission demonstrates the missing binding; it does not establish data theft or an
+exploitable application parser. The cryptographic transcript and existing vector tests
+remain unchanged. In actual TLS 1.3, the server's ALPN response belongs in
+EncryptedExtensions.
+
+Primary sources: [Brinkmann et al., ALPACA (USENIX Security 2021)](https://www.usenix.org/conference/usenixsecurity21/presentation/brinkmann),
+[RFC 9325 §§3.7–3.9](https://www.rfc-editor.org/rfc/rfc9325.html#section-3.7),
+[RFC 7301 §3.2](https://www.rfc-editor.org/rfc/rfc7301.html#section-3.2), and
+[RFC 9846 §4.3](https://www.rfc-editor.org/info/rfc9846/) (TLS 1.3 extension locations).
 
 ## How to Run Locally
 
@@ -114,6 +155,7 @@ Verification:
 ```bash
 npm run typecheck   # tsc strict, no emit
 npm test            # RFC 8448 full/resumed vectors + schedules, auth/MITM, AEAD, replay gates
+npm run verify:service-binding # 32 route/policy outcomes + independent failure controls
 npm run build       # type-check + production bundle
 npm run test:a11y   # claims + WCAG A/AA drive, including the new panel at 320px
 npm run test:mutations # 14 replayable behavioural mutations; requires a clean committed tree
@@ -138,6 +180,11 @@ fallback, and ticket-key-compromise outcome. The same gates
 gate the GitHub Pages deploy (`.github/workflows/deploy.yml`). The protocol regressions also check
 stale first arrivals under all five policies, zero-lifetime and exact-deadline expiry, invalid
 lifetime encodings, missing/mismatched groups, and each failed full-handshake precondition.
+The service-binding phase checks the full eight-route/four-policy matrix, every
+cryptographic failure independently, name-versus-SNI separation, missing/disjoint/invalid
+ALPN, exact protocol identifiers, and handler consistency. Browser tests verify the
+rendered matrix, live handshake-fault propagation, keyboard focus, and reachable verdict
+states through the existing accessibility/contrast/reflow gate at desktop and 320px.
 
 The mutation ledger in `scripts/mutation-ledger.json` changes binder admission, replay stores,
 freshness enforcement, PSK/DHE derivation, fallback, handshake eligibility, group advertisement,

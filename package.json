@@ -14,6 +14,7 @@
     "verify:record": "tsx scripts/phase-checks.ts record",
     "verify:handshake": "tsx scripts/phase-checks.ts handshake",
     "verify:resumption": "tsx scripts/phase-checks.ts resumption",
+    "verify:service-binding": "tsx scripts/phase-checks.ts service-binding",
     "test:a11y": "playwright test",
     "test:mutations": "tsx scripts/mutations.ts"
   },
