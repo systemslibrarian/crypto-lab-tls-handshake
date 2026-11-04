@@ -53,6 +53,7 @@ import {
 } from '../src/resumption-lab';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { checkServiceBinding } from './service-binding-checks';
 
 let assertionCount = 0;
 
@@ -634,6 +635,7 @@ async function main(): Promise<void> {
     discipline: phaseDiscipline,
     rfc5869: phaseRfc5869,
     resumption: phaseResumption,
+    'service-binding': () => checkServiceBinding(assert),
   };
 
   if (phase === 'all') {
@@ -644,13 +646,14 @@ async function main(): Promise<void> {
     await phaseHandshake();
     await phaseRfc5869();
     await phaseResumption();
+    checkServiceBinding(assert);
     console.log(`\nALL GATES PASS (${assertionCount} assertions)`);
     return;
   }
 
   const fn = run[phase];
   if (!fn) {
-    throw new Error(`Usage: tsx scripts/phase-checks.ts <all|keyschedule|auth|record|handshake|discipline|rfc5869|resumption>`);
+    throw new Error(`Usage: tsx scripts/phase-checks.ts <all|keyschedule|auth|record|handshake|discipline|rfc5869|resumption|service-binding>`);
   }
   await fn();
 }
