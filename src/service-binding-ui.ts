@@ -51,12 +51,14 @@ export function serviceBindingSection(route: ServiceRoute, policy: BindingPolicy
     <p class="lead">A trusted certificate can cover several services. Route an HTTP client to a different endpoint,
       then compare the name and application-protocol checks. Start with the same hostname: does adding SNI stop a mail service?</p>
     <div class="binding-controls">
-      <label for="bindingRoute">Service route
+      <div>
+        <label for="bindingRoute">Service route</label>
         <select id="bindingRoute">${SERVICE_ROUTES.map((choice) => `<option value="${choice.id}" ${choice.id === route.id ? 'selected' : ''}>${esc(choice.label)}</option>`).join('')}</select>
-      </label>
-      <label for="bindingPolicy">Admission policy
+      </div>
+      <div>
+        <label for="bindingPolicy">Admission policy</label>
         <select id="bindingPolicy">${BINDING_POLICIES.map((choice) => `<option value="${choice.id}" ${choice.id === policy.id ? 'selected' : ''}>${esc(choice.label)}</option>`).join('')}</select>
-      </label>
+      </div>
     </div>
     <p id="bindingOutcome" class="binding-outcome" role="status" aria-live="polite" aria-atomic="true"
       data-admitted="${result.admitted}" data-intended="${result.intendedService}">${esc(bindingOutcome(result, policy))}</p>
